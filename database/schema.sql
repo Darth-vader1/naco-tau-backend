@@ -240,6 +240,16 @@ CREATE TABLE resource_downloads (
 );
 
 -- ============================================
+-- RESOURCE VIEWS
+-- ============================================
+CREATE TABLE resource_views (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  resource_id UUID REFERENCES academic_resources(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES students(user_id) ON DELETE CASCADE,
+  viewed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================
 -- CREATE INDEXES FOR PERFORMANCE
 -- ============================================
 CREATE INDEX idx_students_email ON students(email);
@@ -252,3 +262,78 @@ CREATE INDEX idx_votes_voter_id ON votes(voter_id);
 CREATE INDEX idx_votes_position_id ON votes(position_id);
 CREATE INDEX idx_audit_logs_user_id ON audit_logs(user_id);
 CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_resources_type ON academic_resources(resource_type);
+CREATE INDEX IF NOT EXISTS idx_timetables_department ON timetables(department);
+CREATE INDEX IF NOT EXISTS idx_resource_views_resource_id ON resource_views(resource_id);
+CREATE INDEX IF NOT EXISTS idx_resource_downloads_resource_id ON resource_downloads(resource_id);
+
+-- ============================================
+-- ROW LEVEL SECURITY (RLS)
+-- Note: The backend uses the SERVICE ROLE KEY which bypasses RLS.
+-- These policies protect access when using the ANON KEY (exposed in frontend env.js).
+-- ============================================
+ALTER TABLE students ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_registrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE academic_resources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE timetables ENABLE ROW LEVEL SECURITY;
+ALTER TABLE career_paths ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_careers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE voting_positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE voting_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE votes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE login_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE resource_downloads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE resource_views ENABLE ROW LEVEL SECURITY;
+
+-- Students: read/write own profile
+CREATE POLICY "students_select_own" ON students FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "students_insert_own" ON students FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "students_update_own" ON students FOR UPDATE USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+
+-- Events: public read for active events (anon + authenticated)
+CREATE POLICY "events_select_public" ON events FOR SELECT USING (is_active = true);
+
+-- Event registrations: read/write own
+CREATE POLICY "event_registrations_select_own" ON event_registrations FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "event_registrations_insert_own" ON event_registrations FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+-- Academic resources: read-only for authenticated users on active resources
+CREATE POLICY "resources_select_authenticated" ON academic_resources FOR SELECT TO authenticated USING (is_active = true);
+
+-- Timetables: read-only for authenticated users
+CREATE POLICY "timetables_select_authenticated" ON timetables FOR SELECT TO authenticated USING (true);
+
+-- Career paths: public read for active entries
+CREATE POLICY "careers_select_public" ON career_paths FOR SELECT USING (is_active = true);
+
+-- Saved careers: read/write/delete own
+CREATE POLICY "saved_careers_select_own" ON saved_careers FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "saved_careers_insert_own" ON saved_careers FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "saved_careers_delete_own" ON saved_careers FOR DELETE USING (auth.uid() = user_id);
+
+-- Voting positions/candidates: public read for active
+CREATE POLICY "voting_positions_select_public" ON voting_positions FOR SELECT USING (is_active = true);
+CREATE POLICY "voting_candidates_select_public" ON voting_candidates FOR SELECT USING (is_active = true);
+
+-- Votes: read/write own (one per position enforced by DB UNIQUE constraint)
+CREATE POLICY "votes_select_own" ON votes FOR SELECT USING (auth.uid() = voter_id);
+CREATE POLICY "votes_insert_own" ON votes FOR INSERT WITH CHECK (auth.uid() = voter_id);
+
+-- Payments: read/write own
+CREATE POLICY "payments_select_own" ON payments FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "payments_insert_own" ON payments FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+-- Login history: read own only
+CREATE POLICY "login_history_select_own" ON login_history FOR SELECT USING (auth.uid() = user_id);
+
+-- Audit logs: no direct anon/authenticated access (only service role via backend)
+CREATE POLICY "audit_logs_no_anon" ON audit_logs FOR SELECT USING (false);
+
+-- Resource downloads & views: read/write own
+CREATE POLICY "resource_downloads_select_own" ON resource_downloads FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "resource_downloads_insert_own" ON resource_downloads FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "resource_views_insert_own" ON resource_views FOR INSERT WITH CHECK (auth.uid() = user_id);

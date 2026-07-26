@@ -32,7 +32,7 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Check if user is banned or inactive
+    // Check if user is banned, rejected, or inactive
     const { data: userStatus, error: statusError } = await supabase
       .from('students')
       .select('status')
@@ -46,6 +46,12 @@ const authenticate = async (req, res, next) => {
     if (userStatus?.status === 'banned') {
       return res.status(403).json({
         error: 'Your account has been suspended. Please contact support.'
+      });
+    }
+
+    if (userStatus?.status === 'rejected') {
+      return res.status(403).json({
+        error: 'Your account registration was rejected. Please contact support for assistance.'
       });
     }
 

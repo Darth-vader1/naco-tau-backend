@@ -12,6 +12,37 @@ async function migrate() {
 
     try {
         // ============================================
+        // 0. CREATE HELPER FUNCTIONS FIRST (required by later steps)
+        // ============================================
+
+        console.log('\n⚡ Creating helper functions...');
+
+        // Function to safely create tables
+        try {
+            await supabase.rpc('exec_sql', {
+                sql: `
+                    CREATE OR REPLACE FUNCTION create_table_if_not_exists(
+                        table_name text,
+                        table_definition text
+                    ) RETURNS void AS $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = create_table_if_not_exists.table_name
+                        ) THEN
+                            EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (' || table_definition || ');';
+                        END IF;
+                    END;
+                    $$ LANGUAGE plpgsql;
+                `
+            });
+            console.log('✅ create_table_if_not_exists function ready');
+        } catch (err) {
+            console.error('Helper function creation error:', err.message);
+        }
+
+        // ============================================
         // 1. CREATE TABLES
         // ============================================
 
@@ -304,6 +335,19 @@ async function migrate() {
         });
         if (downloadError) console.error('Resource downloads error:', downloadError);
 
+        // Resource Views
+        console.log('Creating resource_views table...');
+        const { error: viewsError } = await supabase.rpc('create_table_if_not_exists', {
+            table_name: 'resource_views',
+            table_definition: `
+                id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+                resource_id UUID REFERENCES academic_resources(id) ON DELETE CASCADE,
+                user_id UUID REFERENCES students(user_id) ON DELETE CASCADE,
+                viewed_at TIMESTAMPTZ DEFAULT NOW()
+            `
+        });
+        if (viewsError) console.error('Resource views error:', viewsError);
+
         // ============================================
         // 2. CREATE INDEXES
         // ============================================
@@ -322,7 +366,9 @@ async function migrate() {
             'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);',
             'CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);',
             'CREATE INDEX IF NOT EXISTS idx_resources_type ON academic_resources(resource_type);',
-            'CREATE INDEX IF NOT EXISTS idx_timetables_department ON timetables(department);'
+            'CREATE INDEX IF NOT EXISTS idx_timetables_department ON timetables(department);',
+            'CREATE INDEX IF NOT EXISTS idx_resource_views_resource_id ON resource_views(resource_id);',
+            'CREATE INDEX IF NOT EXISTS idx_resource_downloads_resource_id ON resource_downloads(resource_id);'
         ];
 
         for (const indexSql of indexes) {
@@ -345,7 +391,7 @@ async function migrate() {
             'students', 'admin_users', 'events', 'event_registrations',
             'academic_resources', 'timetables', 'career_paths', 'saved_careers',
             'voting_positions', 'voting_candidates', 'votes', 'payments',
-            'login_history', 'audit_logs', 'resource_downloads'
+            'login_history', 'audit_logs', 'resource_downloads', 'resource_views'
         ];
 
         for (const table of tables) {
@@ -357,6 +403,80 @@ async function migrate() {
                 console.error(`RLS enable failed for ${table}:`, err.message);
             }
         }
+
+        // ============================================
+        // 3b. CREATE RLS POLICIES (anon + authenticated roles)
+        // ============================================
+
+        console.log('\n🛡️  Creating RLS policies...');
+
+        const policies = [
+            // --- students: public read for own profile; write for self only ---
+            `CREATE POLICY "students_select_own" ON students FOR SELECT USING (auth.uid() = user_id);`,
+            `CREATE POLICY "students_insert_own" ON students FOR INSERT WITH CHECK (auth.uid() = user_id);`,
+            `CREATE POLICY "students_update_own" ON students FOR UPDATE USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);`,
+
+            // --- events: public read for active; write admin only ---
+            `CREATE POLICY "events_select_public" ON events FOR SELECT USING (is_active = true);`,
+
+            // --- event_registrations: read/write own records ---
+            `CREATE POLICY "event_registrations_select_own" ON event_registrations FOR SELECT USING (auth.uid() = user_id);`,
+            `CREATE POLICY "event_registrations_insert_own" ON event_registrations FOR INSERT WITH CHECK (auth.uid() = user_id);`,
+
+            // --- academic_resources: read all active authenticated; insert admin ---
+            `CREATE POLICY "resources_select_authenticated" ON academic_resources FOR SELECT TO authenticated USING (is_active = true);`,
+
+            // --- timetables: read all current/authenticated ---
+            `CREATE POLICY "timetables_select_authenticated" ON timetables FOR SELECT TO authenticated USING (true);`,
+
+            // --- career_paths: public read active; write admin only ---
+            `CREATE POLICY "careers_select_public" ON career_paths FOR SELECT USING (is_active = true);`,
+
+            // --- saved_careers: read/write own records ---
+            `CREATE POLICY "saved_careers_select_own" ON saved_careers FOR SELECT USING (auth.uid() = user_id);`,
+            `CREATE POLICY "saved_careers_insert_own" ON saved_careers FOR INSERT WITH CHECK (auth.uid() = user_id);`,
+            `CREATE POLICY "saved_careers_delete_own" ON saved_careers FOR DELETE USING (auth.uid() = user_id);`,
+
+            // --- voting_positions & voting_candidates: public read active ---
+            `CREATE POLICY "voting_positions_select_public" ON voting_positions FOR SELECT USING (is_active = true);`,
+            `CREATE POLICY "voting_candidates_select_public" ON voting_candidates FOR SELECT USING (is_active = true);`,
+
+            // --- votes: read/write own; one per position enforced by UNIQUE ---
+            `CREATE POLICY "votes_select_own" ON votes FOR SELECT USING (auth.uid() = voter_id);`,
+            `CREATE POLICY "votes_insert_own" ON votes FOR INSERT WITH CHECK (auth.uid() = voter_id);`,
+
+            // --- payments: read/write own student records; admin has service role ---
+            `CREATE POLICY "payments_select_own" ON payments FOR SELECT USING (auth.uid() = user_id);`,
+            `CREATE POLICY "payments_insert_own" ON payments FOR INSERT WITH CHECK (auth.uid() = user_id);`,
+
+            // --- login_history: read own ---
+            `CREATE POLICY "login_history_select_own" ON login_history FOR SELECT USING (auth.uid() = user_id);`,
+
+            // --- audit_logs: no direct anon access; service_role only via backend ---
+            `CREATE POLICY "audit_logs_no_anon" ON audit_logs FOR SELECT USING (false);`,
+
+            // --- resource_downloads & resource_views: read/write own ---
+            `CREATE POLICY "resource_downloads_select_own" ON resource_downloads FOR SELECT USING (auth.uid() = user_id);`,
+            `CREATE POLICY "resource_downloads_insert_own" ON resource_downloads FOR INSERT WITH CHECK (auth.uid() = user_id);`,
+            `CREATE POLICY "resource_views_insert_own" ON resource_views FOR INSERT WITH CHECK (auth.uid() = user_id);`
+        ];
+
+        for (const policySql of policies) {
+            try {
+                // Use CREATE POLICY IF NOT EXISTS pattern: wrap in DO block to avoid duplicate errors
+                await supabase.rpc('exec_sql', {
+                    sql: `DO $$ BEGIN ${policySql.replace(/;$/, '')} EXCEPTION WHEN duplicate_object THEN NULL; END $$;`
+                });
+            } catch (applyErr) {
+                // Fallback: try plain create (first run)
+                try {
+                    await supabase.rpc('exec_sql', { sql: policySql });
+                } catch (err) {
+                    console.error(`Policy creation warning:`, err.message);
+                }
+            }
+        }
+        console.log('✅ RLS policies applied (note: backend uses service-role key which bypasses RLS)');
 
         // ============================================
         // 4. CREATE STORAGE BUCKETS
@@ -391,12 +511,12 @@ async function migrate() {
         }
 
         // ============================================
-        // 5. CREATE FUNCTIONS
+        // 5. CREATE ADDITIONAL HELPER FUNCTIONS
         // ============================================
 
-        console.log('\n⚡ Creating helper functions...');
+        console.log('\n⚡ Ensuring helper functions (idempotent OR REPLACE)...');
 
-        // Function to safely create tables
+        // Function to safely execute arbitrary SQL via rpc
         try {
             await supabase.rpc('exec_sql', {
                 sql: `
@@ -410,13 +530,13 @@ async function migrate() {
                             WHERE table_schema = 'public' 
                             AND table_name = create_table_if_not_exists.table_name
                         ) THEN
-                            EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (' || table_definition || ');';
+                            EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (' || table_definition || ';';
                         END IF;
                     END;
                     $$ LANGUAGE plpgsql;
                 `
             });
-            console.log('✅ Helper functions created');
+            console.log('✅ Helper functions ready');
         } catch (err) {
             console.error('Function creation error:', err.message);
         }

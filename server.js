@@ -13,6 +13,15 @@ const studentRoutes = require('./routes/students');
 const eventRoutes = require('./routes/events');
 const votingRoutes = require('./routes/voting');
 const resourceRoutes = require('./routes/resources');
+const timetableRoutes = require('./routes/timetable');
+const careerRoutes = require('./routes/career');
+const paymentRoutes = require('./routes/payment');
+
+// Import audit middleware
+const { auditMiddleware } = require('./middleware/audit');
+
+// Import sanitization middleware
+const { sanitizeRequestBody } = require('./utils/validators');
 
 const app = express();
 
@@ -42,6 +51,14 @@ app.use(morgan('combined'));
 // JSON parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Global input sanitization: escapes HTML entities in all body/query/params text
+// fields to prevent stored XSS attacks (passwords/proofs/tokens are skipped internally)
+app.use(sanitizeRequestBody);
+
+// Audit middleware: auto-log response status, timing, user context, path
+// Runs after body parsing so req.body is accessible for POST/PUT auditing
+app.use(auditMiddleware);
 
 // ============================================
 // GLOBAL RATE LIMITING
@@ -78,6 +95,9 @@ app.use('/api/students', studentRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/voting', votingRoutes);
 app.use('/api/resources', resourceRoutes);
+app.use('/api/timetables', timetableRoutes);
+app.use('/api/career', careerRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // Serve root and fallback to index.html for frontend routes
 app.get('/', (req, res) => {

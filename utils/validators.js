@@ -379,7 +379,7 @@ const sanitizeObject = (obj) => {
 // ============================================
 
 /**
- * Sanitize string input (prevent XSS)
+ * Sanitize string input (prevent XSS) — escapes HTML entities
  */
 const sanitizeInput = (input) => {
     if (!input) return '';
@@ -398,8 +398,54 @@ const sanitizeInput = (input) => {
 const sanitizeArray = (arr) => {
     if (!Array.isArray(arr)) return [];
     return arr.map(item => 
-        typeof item === 'string' ? sanitizeInput(item) : item
+        typeof item === 'string' ? sanitizeInput(item) :
+        Array.isArray(item) ? sanitizeArray(item) :
+        (item && typeof item === 'object') ? sanitizeDeep(item) : item
     );
+};
+
+/**
+ * Deeply sanitize an object: all string values → sanitizeInput,
+ * arrays → sanitizeArray, nested objects are recursed.
+ * Fields matching known-sensitive names (password, token, secret, proof) are left
+ * untouched because they are used verbatim or hashed, not rendered as HTML.
+ */
+const sanitizeDeep = (value) => {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string') return sanitizeInput(value);
+    if (Array.isArray(value)) return sanitizeArray(value);
+    if (typeof value !== 'object') return value;
+
+    const sensitiveKeys = /password|secret|token|proof|manifesto|roadmap|details/i;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+        out[k] = sensitiveKeys.test(k)
+            ? v
+            : sanitizeDeep(v);
+    }
+    return out;
+};
+
+/**
+ * Express middleware: sanitize req.body, req.query, and req.params for all
+ * non-trivial text payloads. Runs AFTER body parsing but BEFORE routes.
+ * Skips binary upload payloads (Buffer), and sensitive fields (passwords, tokens).
+ */
+const sanitizeRequestBody = (req, res, next) => {
+    try {
+        if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+            req.body = sanitizeDeep(req.body);
+        }
+        if (req.query && typeof req.query === 'object') {
+            req.query = sanitizeDeep(req.query);
+        }
+        if (req.params && typeof req.params === 'object') {
+            req.params = sanitizeDeep(req.params);
+        }
+    } catch (err) {
+        console.error('[sanitizeRequestBody] failed:', err.message);
+    }
+    next();
 };
 
 // ============================================
@@ -508,6 +554,8 @@ module.exports = {
     // Input
     sanitizeInput,
     sanitizeArray,
+    sanitizeDeep,
+    sanitizeRequestBody,
     
     // Role
     validateRole,

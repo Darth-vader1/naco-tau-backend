@@ -43,50 +43,99 @@ const auditLog = async ({
 
 /**
  * Middleware to log API requests
+ * - Hooks res.send() to log AFTER response status is determined
+ * - Does NOT log already-explicitly-audited actions (to avoid duplicate audit rows)
+ * - Logs are recorded into audit_logs table with responseTime, path, method, status
  */
 const auditMiddleware = (req, res, next) => {
+    // Ensure request start time is tracked
+    req._startTime = req._startTime || Date.now();
+
     // Store original send function
     const originalSend = res.send;
-    
+
     // Override send to log after response
     res.send = function(data) {
-        // Log only if status is 200-299 (success) or 400-499 (client error)
         const statusCode = res.statusCode;
+
+        // Only log if status is 2xx-4xx (skip 5xx noise logged separately,
+        // and skip very early responses like static files)
         if (statusCode >= 200 && statusCode < 500) {
-            const userId = req.user?.id || null;
+            const userId = req.user?.id || req.userId || null;
             const userEmail = req.user?.email || null;
-            
-            // Log based on route
+
+            // Determine route (if matched) or fallback path
             const route = req.route?.path || req.path;
             const method = req.method;
-            
-            // Skip logging for health checks and static files
-            const skipPaths = ['/api/health', '/api/test'];
-            if (!skipPaths.includes(route)) {
-                auditLog({
-                    action: `${method}_${route.replace(/\//g, '_')}`,
-                    userId: userId,
-                    userEmail: userEmail,
-                    details: {
-                        method,
-                        path: req.path,
-                        query: req.query,
-                        body: req.method === 'GET' ? undefined : req.body,
-                        statusCode: statusCode,
-                        responseTime: Date.now() - req._startTime
-                    },
-                    ip: req.ip,
-                    userAgent: req.headers['user-agent']
-                }).catch(err => console.error('Audit middleware error:', err));
+
+            // Skip paths that are very noisy or handled by explicit auditLog()
+            const skipPrefixes = ['/api/health', '/assets', '/frontend', '/vendor'];
+            const skipActions = new Set([
+                'student_registration', 'admin_login', 'logout',
+                'student_approve', 'student_reject', 'student_deleted',
+                'profile_picture_update', 'resource_created', 'resource_updated', 'resource_deleted',
+                'timetable_created', 'timetable_updated', 'timetable_deleted',
+                'career_path_created', 'career_path_updated', 'career_path_deleted',
+                'payment_submitted', 'payment_verified', 'payment_rejected'
+            ]);
+
+            const shouldSkip =
+                skipPrefixes.some(p => req.originalUrl.startsWith(p)) ||
+                // Skip successful verify calls (very chatty on every SPA route)
+                (method === 'GET' && /\/auth\/verify$/.test(route)) ||
+                // Skip pure-GET reads for non-admin endpoints to keep logs focused
+                (method === 'GET' && statusCode < 400 && !route.includes('/admin'));
+
+            if (!shouldSkip) {
+                const autoAction = `auto_${method}_${route.replace(/\//g, '_').replace(/[:?]/g, '') || 'root'}`;
+                const alreadyAudited =
+                    (typeof autoAction === 'string') &&
+                    [...skipActions].some(a => autoAction.includes(a));
+
+                if (!alreadyAudited) {
+                    auditLog({
+                        action: autoAction.slice(0, 80),
+                        userId: userId,
+                        userEmail: userEmail,
+                        details: {
+                            method,
+                            path: req.originalUrl,
+                            query: Object.keys(req.query || {}).length ? req.query : undefined,
+                            body: (method === 'GET' || req.method === 'DELETE') ? undefined :
+                                Object.keys(req.body || {}).length
+                                    ? redactSecrets(req.body)
+                                    : undefined,
+                            statusCode: statusCode,
+                            responseTime: Date.now() - req._startTime
+                        },
+                        ip: req.ip,
+                        userAgent: req.headers['user-agent']
+                    }).catch(err => console.error('[auditMiddleware] audit log error:', err.message));
+                }
             }
         }
+
         return originalSend.call(this, data);
     };
-    
-    // Track request start time
-    req._startTime = Date.now();
+
     next();
 };
+
+/**
+ * Remove known sensitive fields from logged body (never write passwords to DB)
+ */
+function redactSecrets(body) {
+    if (!body || typeof body !== 'object') return body;
+    const safe = { ...body };
+    for (const key of Object.keys(safe)) {
+        if (/password|secret|token|proof/i.test(key)) {
+            safe[key] = '[REDACTED]';
+        } else if (typeof safe[key] === 'object' && safe[key] !== null && !Array.isArray(safe[key])) {
+            safe[key] = redactSecrets(safe[key]);
+        }
+    }
+    return safe;
+}
 
 /**
  * Log user login
