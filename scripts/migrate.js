@@ -530,7 +530,7 @@ async function migrate() {
                             WHERE table_schema = 'public' 
                             AND table_name = create_table_if_not_exists.table_name
                         ) THEN
-                            EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (' || table_definition || ';';
+                            EXECUTE 'CREATE TABLE ' || quote_ident(table_name) || ' (' || table_definition || ');';
                         END IF;
                     END;
                     $$ LANGUAGE plpgsql;
