@@ -89,6 +89,7 @@ const getPasswordStrength = (password) => {
  * - TAU/CSC/20/001
  * - TAU/SE/20/001
  * - TAU/IT/20/001
+ * - 23/10MSC014
  */
 const validateMatricNo = (matricNo) => {
     if (!matricNo) return false;
@@ -97,7 +98,8 @@ const validateMatricNo = (matricNo) => {
     const patterns = [
         /^TAU\/[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i,
         /^TAU\/[A-Z]{2,4}\/\d{2,4}\/[A-Z0-9]{3,4}$/i,
-        /^[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i
+        /^[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i,
+        /^\d{2}\/\d{2}[A-Z]{2,4}\d{3,4}$/i
     ];
     
     const trimmed = matricNo.trim().toUpperCase();

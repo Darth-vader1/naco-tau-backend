@@ -48,7 +48,7 @@ router.post('/register', authLimiter, async (req, res) => {
     // Validate matric number format
     if (!validateMatricNo(matricNo)) {
       return res.status(400).json({
-        error: 'Invalid matric number format. Expected format: TAU/CS/20/001'
+        error: 'Invalid matric number format. Expected format: TAU/CS/20/001 or 23/10MSC014'
       });
     }
 
