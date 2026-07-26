@@ -106,7 +106,7 @@ router.post('/register', authLimiter, async (req, res) => {
         department: department || 'Computer Science',
         course: course || 'Computer Science',
         phone: phone || null,
-        status: 'pending', // Requires admin verification
+        status: 'active', // Auto-activated on signup
         created_at: new Date().toISOString()
       }]);
 
@@ -130,7 +130,7 @@ router.post('/register', authLimiter, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Registration successful! Please check your email to verify your account. Your account will be activated after admin verification.',
+      message: 'Registration successful! Your account is now active. Please verify your email and login.',
       user: {
         id: authData.user.id,
         email: authData.user.email
@@ -188,14 +188,6 @@ router.post('/login', authLimiter, async (req, res) => {
 
     if (profileError && profileError.code !== 'PGRST116') {
       console.error('Profile fetch error:', profileError);
-    }
-
-    // Check if student is pending verification
-    if (studentProfile && studentProfile.status === 'pending') {
-      return res.status(403).json({
-        error: 'Your account is pending verification by an admin. Please wait for approval.',
-        status: 'pending'
-      });
     }
 
     // Check if student is rejected
