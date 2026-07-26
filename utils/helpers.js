@@ -362,6 +362,62 @@ const createHash = (string, algorithm = 'sha256') => {
 };
 
 // ============================================
+// ADMIN CONFIG HELPERS
+// ============================================
+
+const DEFAULT_ADMIN_EMAIL = 'nacos@tau.edu.ng';
+
+/**
+ * Parses the ADMIN_EMAILS environment variable into a deduplicated,
+ * lowercased Set of emails allowed to log in to the admin endpoint.
+ *
+ * Accepts:
+ *   - "a@x.com,b@x.com,c@x.com"    (comma-separated list)
+ *   - "a@x.com;b@x.com"            (semicolon-separated)
+ *   - '["a@x.com","b@x.com"]'      (JSON array string)
+ *   - single "a@x.com"             (plain email)
+ * Falls back to DEFAULT_ADMIN_EMAIL if empty / missing.
+ */
+const getAdminEmails = () => {
+    const raw = (process.env.ADMIN_EMAILS || '').trim();
+    let emails = [];
+
+    if (!raw) {
+        emails = [DEFAULT_ADMIN_EMAIL];
+    } else if (raw.startsWith('[') && raw.endsWith(']')) {
+        try {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) emails = parsed;
+        } catch (e) { /* fall through to split */ }
+    }
+    if (!emails.length) {
+        emails = raw.split(/[,;]+/);
+    }
+
+    const deduped = [...new Set(
+        emails
+            .map(e => (e || '').toString().trim().toLowerCase())
+            .filter(Boolean)
+    )];
+    if (!deduped.length) deduped.push(DEFAULT_ADMIN_EMAIL);
+    return deduped;
+};
+
+/**
+ * Returns the primary/first configured admin email (used for seed scripts
+ * where we only create one bootstrap super_admin).
+ */
+const getPrimaryAdminEmail = () => getAdminEmails()[0];
+
+/**
+ * Returns true if the given email is present in the admin allow-list (case-insensitive)
+ */
+const isAdminEmailAllowed = (email) => {
+    if (!email) return false;
+    return getAdminEmails().includes(email.toString().trim().toLowerCase());
+};
+
+// ============================================
 // EXPORT ALL HELPERS
 // ============================================
 
@@ -369,40 +425,46 @@ module.exports = {
     // Response
     successResponse,
     errorResponse,
-    
+
     // ID Generators
     generateId,
     generateTransactionId,
     generateRandomPassword,
     generateOTP,
-    
+
     // String
     truncateText,
     slugify,
     getInitials,
-    
+
     // Array
     paginateArray,
     groupBy,
     uniqueBy,
-    
+
     // Date
     getRelativeTime,
     getAcademicSession,
     getCurrentSemester,
-    
+
     // Object
     pick,
     omit,
     deepClone,
     deepMerge,
-    
+
     // Environment
     isDevelopment,
     isProduction,
     isTest,
     getEnv,
-    
+
+    // Admin config
+    DEFAULT_ADMIN_EMAIL,
+    getAdminEmails,
+    getPrimaryAdminEmail,
+    isAdminEmailAllowed,
+
     // Misc
     sleep,
     retry,

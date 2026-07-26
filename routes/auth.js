@@ -6,11 +6,13 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimit');
 const { auditLog } = require('../middleware/audit');
 const { validateEmail, validatePassword, validateMatricNo } = require('../utils/validators');
+const { isAdminEmailAllowed, getAdminEmails, successResponse, errorResponse } = require('../utils/helpers');
+const { authValidationChains, validate } = require('../middleware/validation');
 
 // ============================================
 // STUDENT REGISTRATION
 // ============================================
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', authLimiter, authValidationChains.register, validate, async (req, res) => {
   try {
     const {
       email,
@@ -25,31 +27,23 @@ router.post('/register', authLimiter, async (req, res) => {
 
     // Validate all fields
     if (!email || !password || !firstName || !lastName || !matricNo) {
-      return res.status(400).json({
-        error: 'All required fields must be filled'
-      });
+      return errorResponse(res, 'All required fields must be filled', 400);
     }
 
     // Validate email format (@st.tau.edu.ng or @tau.edu.ng)
     const emailRegex = /^[a-zA-Z0-9._%+-]+@(st\.)?tau\.edu\.ng$/;
     if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        error: 'Please use a valid TAU student email (@st.tau.edu.ng or @tau.edu.ng)'
-      });
+      return errorResponse(res, 'Please use a valid TAU student email (@st.tau.edu.ng or @tau.edu.ng)', 400);
     }
 
     // Validate password strength
     if (!validatePassword(password)) {
-      return res.status(400).json({
-        error: 'Password must be at least 8 characters with uppercase, lowercase, number and special character'
-      });
+      return errorResponse(res, 'Password must be at least 8 characters with uppercase, lowercase, number and special character', 400);
     }
 
     // Validate matric number format
     if (!validateMatricNo(matricNo)) {
-      return res.status(400).json({
-        error: 'Invalid matric number format. Expected format: TAU/CS/20/001 or 23/10MSC014'
-      });
+      return errorResponse(res, 'Invalid matric number format. Expected format: TAU/CS/20/001 or 23/10MSC014', 400);
     }
 
     // Check if email already exists
@@ -61,14 +55,10 @@ router.post('/register', authLimiter, async (req, res) => {
 
     if (existingStudent) {
       if (existingStudent.email === email.toLowerCase()) {
-        return res.status(409).json({
-          error: 'This email is already registered. Please login instead.'
-        });
+        return errorResponse(res, 'This email is already registered. Please login instead.', 409);
       }
       if (existingStudent.matric_no === matricNo.toUpperCase()) {
-        return res.status(409).json({
-          error: 'This matric number is already registered.'
-        });
+        return errorResponse(res, 'This matric number is already registered.', 409);
       }
     }
 
@@ -88,9 +78,7 @@ router.post('/register', authLimiter, async (req, res) => {
 
     if (authError) {
       console.error('Signup error:', authError);
-      return res.status(400).json({
-        error: 'Registration failed. Please try again.'
-      });
+      return errorResponse(res, 'Registration failed. Please try again.', 400, authError);
     }
 
     // Create student profile
@@ -115,9 +103,7 @@ router.post('/register', authLimiter, async (req, res) => {
       await supabase.auth.admin.deleteUser(authData.user.id)
         .catch(err => console.error('Cleanup error:', err));
       
-      return res.status(500).json({
-        error: 'Registration failed. Please contact support.'
-      });
+      return errorResponse(res, 'Registration failed. Please contact support.', 500, profileError);
     }
 
     // Log registration
@@ -128,42 +114,32 @@ router.post('/register', authLimiter, async (req, res) => {
       ip: req.ip
     });
 
-    res.status(201).json({
-      success: true,
-      message: 'Registration successful! Your account is now active. Please verify your email and login.',
-      user: {
-        id: authData.user.id,
-        email: authData.user.email
-      }
-    });
+    return successResponse(res, {
+      id: authData.user.id,
+      email: authData.user.email
+    }, 'Registration successful! Your account is now active. Please verify your email and login.', 201);
 
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({
-      error: 'Registration failed. Please try again.'
-    });
+    return errorResponse(res, 'Registration failed. Please try again.', 500, error);
   }
 });
 
 // ============================================
 // STUDENT LOGIN
 // ============================================
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', authLimiter, authValidationChains.login, validate, async (req, res) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({
-        error: 'Email and password are required'
-      });
+      return errorResponse(res, 'Email and password are required', 400);
     }
 
     // Validate email
     const emailRegex = /^[a-zA-Z0-9._%+-]+@(st\.)?tau\.edu\.ng$/;
     if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        error: 'Please use a valid TAU student email'
-      });
+      return errorResponse(res, 'Please use a valid TAU student email', 400);
     }
 
     // Attempt login with Supabase
@@ -174,9 +150,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     if (error) {
       console.error('Login error:', error.message);
-      return res.status(401).json({
-        error: 'Invalid email or password. Please try again.'
-      });
+      return errorResponse(res, 'Invalid email or password. Please try again.', 401, error);
     }
 
     // Check student verification status
@@ -193,16 +167,20 @@ router.post('/login', authLimiter, async (req, res) => {
     // Check if student is rejected
     if (studentProfile && studentProfile.status === 'rejected') {
       return res.status(403).json({
+        success: false,
         error: 'Your account registration was rejected. Please contact support for assistance.',
-        status: 'rejected'
+        status: 'rejected',
+        timestamp: new Date().toISOString()
       });
     }
 
     // Check if student is banned
     if (studentProfile && studentProfile.status === 'banned') {
       return res.status(403).json({
+        success: false,
         error: 'Your account has been suspended. Please contact support.',
-        status: 'banned'
+        status: 'banned',
+        timestamp: new Date().toISOString()
       });
     }
 
@@ -227,9 +205,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const role = roleData?.role || 'student';
 
-    res.json({
-      success: true,
-      message: 'Login successful',
+    return successResponse(res, {
       user: {
         id: data.user.id,
         email: data.user.email,
@@ -237,28 +213,28 @@ router.post('/login', authLimiter, async (req, res) => {
         student: studentProfile || null
       },
       session: data.session
-    });
+    }, 'Login successful');
 
   } catch (error) {
     console.error('Login route error:', error);
-    res.status(500).json({
-      error: 'Login failed. Please try again.'
-    });
+    return errorResponse(res, 'Login failed. Please try again.', 500, error);
   }
 });
 
 // ============================================
 // ADMIN LOGIN (Shared Account)
 // ============================================
-router.post('/admin/login', authLimiter, async (req, res) => {
+router.post('/admin/login', authLimiter, authValidationChains.adminLogin, validate, async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Only allow the specific admin email
-    if (email.toLowerCase() !== 'nacos@tau.edu.ng') {
-      return res.status(401).json({
-        error: 'Invalid admin credentials'
-      });
+    // Only allow emails in the ADMIN_EMAILS env allow-list (comma-separated)
+    if (!isAdminEmailAllowed(email)) {
+      const admins = getAdminEmails();
+      console.warn(
+        `[admin-login] Rejected email ${email} — allow-list: [${admins.join(', ')}]`
+      );
+      return errorResponse(res, 'Invalid admin credentials', 401);
     }
 
     // Attempt login with Supabase
@@ -269,9 +245,7 @@ router.post('/admin/login', authLimiter, async (req, res) => {
 
     if (error) {
       console.error('Admin login error:', error.message);
-      return res.status(401).json({
-        error: 'Invalid admin credentials'
-      });
+      return errorResponse(res, 'Invalid admin credentials', 401, error);
     }
 
     // Check if user has admin role
@@ -282,9 +256,7 @@ router.post('/admin/login', authLimiter, async (req, res) => {
       .single();
 
     if (adminError || !adminData) {
-      return res.status(403).json({
-        error: 'Access denied. Admin privileges required.'
-      });
+      return errorResponse(res, 'Access denied. Admin privileges required.', 403);
     }
 
     // Log admin login
@@ -295,9 +267,7 @@ router.post('/admin/login', authLimiter, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Admin login successful',
+    return successResponse(res, {
       user: {
         id: data.user.id,
         email: data.user.email,
@@ -305,13 +275,11 @@ router.post('/admin/login', authLimiter, async (req, res) => {
         name: adminData.name
       },
       session: data.session
-    });
+    }, 'Admin login successful');
 
   } catch (error) {
     console.error('Admin login error:', error);
-    res.status(500).json({
-      error: 'Admin login failed. Please try again.'
-    });
+    return errorResponse(res, 'Admin login failed. Please try again.', 500, error);
   }
 });
 
@@ -327,7 +295,7 @@ router.get('/verify', authenticate, async (req, res) => {
       .eq('user_id', req.userId)
       .maybeSingle();
 
-    res.json({
+    return successResponse(res, {
       authenticated: true,
       user: {
         id: req.user.id,
@@ -335,12 +303,10 @@ router.get('/verify', authenticate, async (req, res) => {
         role: req.userRole || 'student',
         student: student || null
       }
-    });
+    }, 'Session verified');
   } catch (error) {
     console.error('Verification error:', error);
-    res.status(500).json({
-      error: 'Verification failed'
-    });
+    return errorResponse(res, 'Verification failed', 500, error);
   }
 });
 
@@ -359,29 +325,22 @@ router.post('/logout', authenticate, async (req, res) => {
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
 
-    res.json({
-      success: true,
-      message: 'Logged out successfully'
-    });
+    return successResponse(res, null, 'Logged out successfully');
   } catch (error) {
     console.error('Logout error:', error);
-    res.status(500).json({
-      error: 'Logout failed. Please try again.'
-    });
+    return errorResponse(res, 'Logout failed. Please try again.', 500, error);
   }
 });
 
 // ============================================
 // FORGOT PASSWORD
 // ============================================
-router.post('/forgot-password', authLimiter, async (req, res) => {
+router.post('/forgot-password', authLimiter, authValidationChains.forgotPassword, validate, async (req, res) => {
   try {
     const { email } = req.body;
 
     if (!email || !validateEmail(email)) {
-      return res.status(400).json({
-        error: 'Please provide a valid email address'
-      });
+      return errorResponse(res, 'Please provide a valid email address', 400);
     }
 
     const { error } = await supabase.auth.resetPasswordForEmail(email.toLowerCase(), {
@@ -391,22 +350,14 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
     if (error) {
       console.error('Password reset error:', error);
       // Don't reveal if email exists or not for security
-      return res.status(200).json({
-        success: true,
-        message: 'If your email is registered, you will receive a password reset link.'
-      });
+      return successResponse(res, null, 'If your email is registered, you will receive a password reset link.');
     }
 
-    res.json({
-      success: true,
-      message: 'Password reset link sent to your email.'
-    });
+    return successResponse(res, null, 'Password reset link sent to your email.');
 
   } catch (error) {
     console.error('Forgot password error:', error);
-    res.status(500).json({
-      error: 'Failed to send reset link. Please try again.'
-    });
+    return errorResponse(res, 'Failed to send reset link. Please try again.', 500, error);
   }
 });
 

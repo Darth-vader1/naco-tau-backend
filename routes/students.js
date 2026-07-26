@@ -4,11 +4,13 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
+const { successResponse, errorResponse } = require('../utils/helpers');
+const { studentValidationChains, idParam, paginationQuery, validate } = require('../middleware/validation');
 
 // ============================================
 // GET ALL STUDENTS (Admin)
 // ============================================
-router.get('/', authenticate, requireAdmin, async (req, res) => {
+router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (req, res) => {
   try {
     const { 
       page = 1, 
@@ -45,7 +47,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       students: data,
       pagination: {
         page: parseInt(page),
@@ -53,12 +55,10 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         total: count,
         pages: Math.ceil(count / limit)
       }
-    });
+    }, 'Students retrieved successfully');
   } catch (error) {
     console.error('Students fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch students'
-    });
+    return errorResponse(res, 'Failed to fetch students', 500, error);
   }
 });
 
@@ -75,30 +75,26 @@ router.get('/pending', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       count: data.length,
       students: data
-    });
+    }, 'Pending students retrieved successfully');
   } catch (error) {
     console.error('Pending students fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch pending students'
-    });
+    return errorResponse(res, 'Failed to fetch pending students', 500, error);
   }
 });
 
 // ============================================
 // VERIFY STUDENT (Admin)
 // ============================================
-router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
+router.put('/:id/verify', authenticate, requireAdmin, idParam('id'), validate, async (req, res) => {
   try {
     const { id } = req.params;
     const { action } = req.body; // 'approve' or 'reject'
 
     if (!['approve', 'reject'].includes(action)) {
-      return res.status(400).json({
-        error: 'Invalid action. Use "approve" or "reject".'
-      });
+      return errorResponse(res, 'Invalid action. Use "approve" or "reject".', 400);
     }
 
     const newStatus = action === 'approve' ? 'active' : 'rejected';
@@ -116,9 +112,7 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Student not found'
-        });
+        return errorResponse(res, 'Student not found', 404);
       }
       throw error;
     }
@@ -138,17 +132,11 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
     // Send verification email (optional)
     // await sendVerificationEmail(data.email, action);
 
-    res.json({
-      success: true,
-      message: `Student ${action}d successfully`,
-      student: data
-    });
+    return successResponse(res, { student: data }, `Student ${action}d successfully`);
 
   } catch (error) {
     console.error('Student verification error:', error);
-    res.status(500).json({
-      error: 'Failed to verify student'
-    });
+    return errorResponse(res, 'Failed to verify student', 500, error);
   }
 });
 
@@ -165,26 +153,22 @@ router.get('/me', authenticate, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Student profile not found. Please contact support.'
-        });
+        return errorResponse(res, 'Student profile not found. Please contact support.', 404);
       }
       throw error;
     }
 
-    res.json(data);
+    return successResponse(res, data, 'Profile retrieved successfully');
   } catch (error) {
     console.error('Profile fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to load profile'
-    });
+    return errorResponse(res, 'Failed to load profile', 500, error);
   }
 });
 
 // ============================================
 // UPDATE PROFILE
 // ============================================
-router.put('/me', authenticate, async (req, res) => {
+router.put('/me', authenticate, studentValidationChains.updateProfile, validate, async (req, res) => {
   try {
     const { 
       first_name, 
@@ -217,17 +201,11 @@ router.put('/me', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      message: 'Profile updated successfully',
-      student: data
-    });
+    return successResponse(res, { student: data }, 'Profile updated successfully');
 
   } catch (error) {
     console.error('Profile update error:', error);
-    res.status(500).json({
-      error: 'Failed to update profile'
-    });
+    return errorResponse(res, 'Failed to update profile', 500, error);
   }
 });
 
@@ -239,9 +217,7 @@ router.post('/me/profile-picture', authenticate, async (req, res) => {
     const { imageUrl } = req.body;
 
     if (!imageUrl) {
-      return res.status(400).json({
-        error: 'Image URL is required'
-      });
+      return errorResponse(res, 'Image URL is required', 400);
     }
 
     const { data, error } = await supabase
@@ -264,17 +240,11 @@ router.post('/me/profile-picture', authenticate, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Profile picture updated',
-      profile_picture_url: data.profile_picture_url
-    });
+    return successResponse(res, { profile_picture_url: data.profile_picture_url }, 'Profile picture updated');
 
   } catch (error) {
     console.error('Profile picture update error:', error);
-    res.status(500).json({
-      error: 'Failed to update profile picture'
-    });
+    return errorResponse(res, 'Failed to update profile picture', 500, error);
   }
 });
 
@@ -293,9 +263,7 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (fetchError) {
-      return res.status(404).json({
-        error: 'Student not found'
-      });
+      return errorResponse(res, 'Student not found', 404);
     }
 
     // Delete student profile
@@ -324,16 +292,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Student deleted successfully'
-    });
+    return successResponse(res, null, 'Student deleted successfully');
 
   } catch (error) {
     console.error('Student deletion error:', error);
-    res.status(500).json({
-      error: 'Failed to delete student'
-    });
+    return errorResponse(res, 'Failed to delete student', 500, error);
   }
 });
 

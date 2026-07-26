@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
+const { successResponse, errorResponse } = require('../utils/helpers');
 
 // ============================================
 // GET ALL TIMETABLES
@@ -33,7 +34,7 @@ router.get('/', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       timetables: data,
       pagination: {
         page: parseInt(page),
@@ -41,12 +42,10 @@ router.get('/', authenticate, async (req, res) => {
         total: count,
         pages: Math.ceil(count / limit)
       }
-    });
+    }, 'Timetables retrieved successfully');
   } catch (error) {
     console.error('Timetables fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch timetables'
-    });
+    return errorResponse(res, 'Failed to fetch timetables', 500, error);
   }
 });
 
@@ -72,12 +71,10 @@ router.get('/latest', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json(data[0] || null);
+    return successResponse(res, data[0] || null, 'Latest timetable retrieved successfully');
   } catch (error) {
     console.error('Latest timetable fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch latest timetable'
-    });
+    return errorResponse(res, 'Failed to fetch latest timetable', 500, error);
   }
 });
 
@@ -99,9 +96,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     } = req.body;
 
     if (!title || !department || !file_url) {
-      return res.status(400).json({
-        error: 'Title, department, and file URL are required'
-      });
+      return errorResponse(res, 'Title, department, and file URL are required', 400);
     }
 
     // If this is set as current, unset others for this department
@@ -144,17 +139,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.status(201).json({
-      success: true,
-      message: 'Timetable created successfully',
-      timetable: data
-    });
+    return successResponse(res, { timetable: data }, 'Timetable created successfully', 201);
 
   } catch (error) {
     console.error('Timetable creation error:', error);
-    res.status(500).json({
-      error: 'Failed to create timetable'
-    });
+    return errorResponse(res, 'Failed to create timetable', 500, error);
   }
 });
 
@@ -174,9 +163,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (fetchError) {
-      return res.status(404).json({
-        error: 'Timetable not found'
-      });
+      return errorResponse(res, 'Timetable not found', 404);
     }
 
     // Increment version for new upload
@@ -214,17 +201,11 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Timetable updated successfully',
-      timetable: data
-    });
+    return successResponse(res, { timetable: data }, 'Timetable updated successfully');
 
   } catch (error) {
     console.error('Timetable update error:', error);
-    res.status(500).json({
-      error: 'Failed to update timetable'
-    });
+    return errorResponse(res, 'Failed to update timetable', 500, error);
   }
 });
 
@@ -242,9 +223,7 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (fetchError) {
-      return res.status(404).json({
-        error: 'Timetable not found'
-      });
+      return errorResponse(res, 'Timetable not found', 404);
     }
 
     // Delete file from storage
@@ -273,16 +252,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Timetable deleted successfully'
-    });
+    return successResponse(res, null, 'Timetable deleted successfully');
 
   } catch (error) {
     console.error('Timetable deletion error:', error);
-    res.status(500).json({
-      error: 'Failed to delete timetable'
-    });
+    return errorResponse(res, 'Failed to delete timetable', 500, error);
   }
 });
 

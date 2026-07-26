@@ -1,19 +1,12 @@
 // backend/middleware/rateLimit.js
+//
+// Rate-limiting tiers (each exported individually; mounted only when needed).
+// NOTE: The global /api/* rate limiter is defined in server.js and reads
+// process.env.GLOBAL_RATE_LIMIT (default 100 req / 15 min). The duplicate
+// "globalLimiter" that used to live here (limit = 1000) was removed because
+// it was never mounted and created confusion about which limit was active.
+
 const rateLimit = require('express-rate-limit');
-
-// ============================================
-// GLOBAL RATE LIMIT
-// ============================================
-
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 1000,
-    message: {
-        error: 'Too many requests from this IP. Please try again later.'
-    },
-    standardHeaders: true,
-    legacyHeaders: false
-});
 
 // ============================================
 // AUTH RATE LIMIT
@@ -78,7 +71,7 @@ const uploadLimiter = rateLimit({
 });
 
 // ============================================
-// API RATE LIMIT (Stricter)
+// API RATE LIMIT (stricter, optional per-route)
 // ============================================
 
 const apiLimiter = rateLimit({
@@ -92,7 +85,6 @@ const apiLimiter = rateLimit({
 });
 
 module.exports = {
-    globalLimiter,
     authLimiter,
     registrationLimiter,
     votingLimiter,

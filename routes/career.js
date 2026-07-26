@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
+const { successResponse, errorResponse } = require('../utils/helpers');
 
 // ============================================
 // GET ALL CAREER PATHS
@@ -40,7 +41,7 @@ router.get('/', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       careers: data,
       pagination: {
         page: parseInt(page),
@@ -48,12 +49,10 @@ router.get('/', authenticate, async (req, res) => {
         total: count,
         pages: Math.ceil(count / limit)
       }
-    });
+    }, 'Career paths retrieved successfully');
   } catch (error) {
     console.error('Career paths fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch career paths'
-    });
+    return errorResponse(res, 'Failed to fetch career paths', 500, error);
   }
 });
 
@@ -72,19 +71,15 @@ router.get('/:id', authenticate, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Career path not found'
-        });
+        return errorResponse(res, 'Career path not found', 404);
       }
       throw error;
     }
 
-    res.json(data);
+    return successResponse(res, data, 'Career path retrieved successfully');
   } catch (error) {
     console.error('Career fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch career path'
-    });
+    return errorResponse(res, 'Failed to fetch career path', 500, error);
   }
 });
 
@@ -107,9 +102,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     } = req.body;
 
     if (!title || !description || !category) {
-      return res.status(400).json({
-        error: 'Title, description, and category are required'
-      });
+      return errorResponse(res, 'Title, description, and category are required', 400);
     }
 
     const { data, error } = await supabase
@@ -145,17 +138,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.status(201).json({
-      success: true,
-      message: 'Career path created successfully',
-      career: data
-    });
+    return successResponse(res, { career: data }, 'Career path created successfully', 201);
 
   } catch (error) {
     console.error('Career creation error:', error);
-    res.status(500).json({
-      error: 'Failed to create career path'
-    });
+    return errorResponse(res, 'Failed to create career path', 500, error);
   }
 });
 
@@ -177,9 +164,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Career path not found'
-        });
+        return errorResponse(res, 'Career path not found', 404);
       }
       throw error;
     }
@@ -194,17 +179,11 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Career path updated successfully',
-      career: data
-    });
+    return successResponse(res, { career: data }, 'Career path updated successfully');
 
   } catch (error) {
     console.error('Career update error:', error);
-    res.status(500).json({
-      error: 'Failed to update career path'
-    });
+    return errorResponse(res, 'Failed to update career path', 500, error);
   }
 });
 
@@ -222,9 +201,7 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (fetchError) {
-      return res.status(404).json({
-        error: 'Career path not found'
-      });
+      return errorResponse(res, 'Career path not found', 404);
     }
 
     const { error } = await supabase
@@ -244,16 +221,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Career path deleted successfully'
-    });
+    return successResponse(res, null, 'Career path deleted successfully');
 
   } catch (error) {
     console.error('Career deletion error:', error);
-    res.status(500).json({
-      error: 'Failed to delete career path'
-    });
+    return errorResponse(res, 'Failed to delete career path', 500, error);
   }
 });
 
@@ -273,9 +245,7 @@ router.post('/:id/save', authenticate, async (req, res) => {
       .maybeSingle();
 
     if (existing) {
-      return res.status(409).json({
-        error: 'Career path already saved'
-      });
+      return errorResponse(res, 'Career path already saved', 409);
     }
 
     const { data, error } = await supabase
@@ -290,17 +260,11 @@ router.post('/:id/save', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      message: 'Career path saved successfully',
-      saved: data
-    });
+    return successResponse(res, { saved: data }, 'Career path saved successfully');
 
   } catch (error) {
     console.error('Save career error:', error);
-    res.status(500).json({
-      error: 'Failed to save career path'
-    });
+    return errorResponse(res, 'Failed to save career path', 500, error);
   }
 });
 
@@ -321,12 +285,10 @@ router.get('/saved/my', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json(data || []);
+    return successResponse(res, data || [], 'Saved careers retrieved successfully');
   } catch (error) {
     console.error('Saved careers fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch saved careers'
-    });
+    return errorResponse(res, 'Failed to fetch saved careers', 500, error);
   }
 });
 

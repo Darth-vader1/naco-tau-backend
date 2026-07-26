@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
+const { successResponse, errorResponse } = require('../utils/helpers');
 
 // ============================================
 // GET ALL RESOURCES
@@ -41,7 +42,7 @@ router.get('/', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       resources: data,
       pagination: {
         page: parseInt(page),
@@ -49,12 +50,10 @@ router.get('/', authenticate, async (req, res) => {
         total: count,
         pages: Math.ceil(count / limit)
       }
-    });
+    }, 'Resources retrieved successfully');
   } catch (error) {
     console.error('Resources fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch resources'
-    });
+    return errorResponse(res, 'Failed to fetch resources', 500, error);
   }
 });
 
@@ -73,9 +72,7 @@ router.get('/:id', authenticate, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Resource not found'
-        });
+        return errorResponse(res, 'Resource not found', 404);
       }
       throw error;
     }
@@ -90,12 +87,10 @@ router.get('/:id', authenticate, async (req, res) => {
       }])
       .catch(err => console.error('View tracking error:', err));
 
-    res.json(data);
+    return successResponse(res, data, 'Resource retrieved successfully');
   } catch (error) {
     console.error('Resource fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch resource'
-    });
+    return errorResponse(res, 'Failed to fetch resource', 500, error);
   }
 });
 
@@ -119,9 +114,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     } = req.body;
 
     if (!title || !resource_type || !file_url) {
-      return res.status(400).json({
-        error: 'Title, resource type, and file URL are required'
-      });
+      return errorResponse(res, 'Title, resource type, and file URL are required', 400);
     }
 
     const { data, error } = await supabase
@@ -159,17 +152,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.status(201).json({
-      success: true,
-      message: 'Resource created successfully',
-      resource: data
-    });
+    return successResponse(res, { resource: data }, 'Resource created successfully', 201);
 
   } catch (error) {
     console.error('Resource creation error:', error);
-    res.status(500).json({
-      error: 'Failed to create resource'
-    });
+    return errorResponse(res, 'Failed to create resource', 500, error);
   }
 });
 
@@ -191,9 +178,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Resource not found'
-        });
+        return errorResponse(res, 'Resource not found', 404);
       }
       throw error;
     }
@@ -208,17 +193,11 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Resource updated successfully',
-      resource: data
-    });
+    return successResponse(res, { resource: data }, 'Resource updated successfully');
 
   } catch (error) {
     console.error('Resource update error:', error);
-    res.status(500).json({
-      error: 'Failed to update resource'
-    });
+    return errorResponse(res, 'Failed to update resource', 500, error);
   }
 });
 
@@ -237,9 +216,7 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (fetchError) {
-      return res.status(404).json({
-        error: 'Resource not found'
-      });
+      return errorResponse(res, 'Resource not found', 404);
     }
 
     // Delete the file from storage if it exists
@@ -268,16 +245,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: 'Resource deleted successfully'
-    });
+    return successResponse(res, null, 'Resource deleted successfully');
 
   } catch (error) {
     console.error('Resource deletion error:', error);
-    res.status(500).json({
-      error: 'Failed to delete resource'
-    });
+    return errorResponse(res, 'Failed to delete resource', 500, error);
   }
 });
 
@@ -300,9 +272,7 @@ router.post('/:id/download', authenticate, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Resource not found'
-        });
+        return errorResponse(res, 'Resource not found', 404);
       }
       throw error;
     }
@@ -317,17 +287,14 @@ router.post('/:id/download', authenticate, async (req, res) => {
       }])
       .catch(err => console.error('Download tracking error:', err));
 
-    res.json({
-      success: true,
+    return successResponse(res, {
       download_url: data.file_url,
       file_name: data.file_name
-    });
+    }, 'Download processed successfully');
 
   } catch (error) {
     console.error('Resource download error:', error);
-    res.status(500).json({
-      error: 'Failed to process download'
-    });
+    return errorResponse(res, 'Failed to process download', 500, error);
   }
 });
 

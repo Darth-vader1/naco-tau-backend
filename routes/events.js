@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const { successResponse, errorResponse } = require('../utils/helpers');
 
 // ============================================
 // GET UPCOMING EVENTS
@@ -21,12 +22,10 @@ router.get('/upcoming', async (req, res) => {
 
     if (error) throw error;
 
-    res.json(data || []);
+    return successResponse(res, data || [], 'Upcoming events retrieved successfully');
   } catch (error) {
     console.error('Events fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch events'
-    });
+    return errorResponse(res, 'Failed to fetch events', 500, error);
   }
 });
 
@@ -47,12 +46,10 @@ router.get('/past', async (req, res) => {
 
     if (error) throw error;
 
-    res.json(data || []);
+    return successResponse(res, data || [], 'Past events retrieved successfully');
   } catch (error) {
     console.error('Past events fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch past events'
-    });
+    return errorResponse(res, 'Failed to fetch past events', 500, error);
   }
 });
 
@@ -71,19 +68,15 @@ router.get('/:id', async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Event not found'
-        });
+        return errorResponse(res, 'Event not found', 404);
       }
       throw error;
     }
 
-    res.json(data);
+    return successResponse(res, data, 'Event retrieved successfully');
   } catch (error) {
     console.error('Event fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch event'
-    });
+    return errorResponse(res, 'Failed to fetch event', 500, error);
   }
 });
 
@@ -106,9 +99,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     } = req.body;
 
     if (!title || !date) {
-      return res.status(400).json({
-        error: 'Title and date are required'
-      });
+      return errorResponse(res, 'Title and date are required', 400);
     }
 
     const { data, error } = await supabase
@@ -133,17 +124,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    res.status(201).json({
-      success: true,
-      message: 'Event created successfully',
-      event: data
-    });
+    return successResponse(res, { event: data }, 'Event created successfully', 201);
 
   } catch (error) {
     console.error('Event creation error:', error);
-    res.status(500).json({
-      error: 'Failed to create event'
-    });
+    return errorResponse(res, 'Failed to create event', 500, error);
   }
 });
 
@@ -165,24 +150,16 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Event not found'
-        });
+        return errorResponse(res, 'Event not found', 404);
       }
       throw error;
     }
 
-    res.json({
-      success: true,
-      message: 'Event updated successfully',
-      event: data
-    });
+    return successResponse(res, { event: data }, 'Event updated successfully');
 
   } catch (error) {
     console.error('Event update error:', error);
-    res.status(500).json({
-      error: 'Failed to update event'
-    });
+    return errorResponse(res, 'Failed to update event', 500, error);
   }
 });
 
@@ -202,9 +179,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
       .single();
 
     if (eventError || !event) {
-      return res.status(404).json({
-        error: 'Event not found or inactive'
-      });
+      return errorResponse(res, 'Event not found or inactive', 404);
     }
 
     // Check if already registered
@@ -216,9 +191,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
       .maybeSingle();
 
     if (existingRegistration) {
-      return res.status(409).json({
-        error: 'You are already registered for this event'
-      });
+      return errorResponse(res, 'You are already registered for this event', 409);
     }
 
     // Register user
@@ -235,17 +208,11 @@ router.post('/:id/register', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
-      success: true,
-      message: 'Successfully registered for event',
-      registration: data
-    });
+    return successResponse(res, { registration: data }, 'Successfully registered for event');
 
   } catch (error) {
     console.error('Event registration error:', error);
-    res.status(500).json({
-      error: 'Failed to register for event'
-    });
+    return errorResponse(res, 'Failed to register for event', 500, error);
   }
 });
 

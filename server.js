@@ -7,7 +7,19 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 
-// Import routes
+// ---- Middleware & helpers ---------------------------------------------------
+// (Imported BEFORE routes so that every require() invocation has its exports
+//  ready for anyone who needs them. This reordering also makes the file's
+//  flow easier to read: setup → middleware → routes → fallbacks.)
+
+const { auditMiddleware } = require('./middleware/audit');
+const { sanitizeRequestBody } = require('./utils/validators');
+
+// ---- Route modules ---------------------------------------------------------
+// Loaded after middleware & helpers because some routes require() them
+// (e.g. auth.js uses helpers.successResponse / errorResponse, and imports
+//  middleware/auth and middleware/audit directly).
+
 const authRoutes = require('./routes/auth');
 const studentRoutes = require('./routes/students');
 const eventRoutes = require('./routes/events');
@@ -16,12 +28,6 @@ const resourceRoutes = require('./routes/resources');
 const timetableRoutes = require('./routes/timetable');
 const careerRoutes = require('./routes/career');
 const paymentRoutes = require('./routes/payment');
-
-// Import audit middleware
-const { auditMiddleware } = require('./middleware/audit');
-
-// Import sanitization middleware
-const { sanitizeRequestBody } = require('./utils/validators');
 
 const app = express();
 
@@ -66,13 +72,19 @@ app.use(auditMiddleware);
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: Math.max(1, parseInt(process.env.GLOBAL_RATE_LIMIT || '100', 10)),
   message: {
     error: 'Too many requests from this IP, please try again later.'
   },
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// Trust proxy (Railway / Cloudflare / Nginx) so rate limits key on the real client IP
+if (process.env.TRUST_PROXY) {
+  const tp = process.env.TRUST_PROXY;
+  app.set('trust proxy', /^(true|1)$/i.test(tp) ? true : tp);
+}
 
 app.use('/api/', globalLimiter);
 

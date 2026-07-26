@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
+const { successResponse, errorResponse } = require('../utils/helpers');
 
 // ============================================
 // SUBMIT PAYMENT (Student)
@@ -19,9 +20,7 @@ router.post('/submit', authenticate, async (req, res) => {
     } = req.body;
 
     if (!amount || !payment_type || !payment_proof_url) {
-      return res.status(400).json({
-        error: 'Amount, payment type, and proof are required'
-      });
+      return errorResponse(res, 'Amount, payment type, and proof are required', 400);
     }
 
     const { data, error } = await supabase
@@ -52,17 +51,11 @@ router.post('/submit', authenticate, async (req, res) => {
       ip: req.ip
     });
 
-    res.status(201).json({
-      success: true,
-      message: 'Payment submitted for verification',
-      payment: data
-    });
+    return successResponse(res, { payment: data }, 'Payment submitted for verification', 201);
 
   } catch (error) {
     console.error('Payment submission error:', error);
-    res.status(500).json({
-      error: 'Failed to submit payment'
-    });
+    return errorResponse(res, 'Failed to submit payment', 500, error);
   }
 });
 
@@ -87,12 +80,10 @@ router.get('/my', authenticate, async (req, res) => {
 
     if (error) throw error;
 
-    res.json(data || []);
+    return successResponse(res, data || [], 'Payments retrieved successfully');
   } catch (error) {
     console.error('Payments fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch payments'
-    });
+    return errorResponse(res, 'Failed to fetch payments', 500, error);
   }
 });
 
@@ -130,7 +121,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({
+    return successResponse(res, {
       payments: data,
       pagination: {
         page: parseInt(page),
@@ -138,12 +129,10 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
         total: count,
         pages: Math.ceil(count / limit)
       }
-    });
+    }, 'Payments retrieved successfully');
   } catch (error) {
     console.error('Payments fetch error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch payments'
-    });
+    return errorResponse(res, 'Failed to fetch payments', 500, error);
   }
 });
 
@@ -156,9 +145,7 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
     const { status, notes } = req.body;
 
     if (!['verified', 'rejected'].includes(status)) {
-      return res.status(400).json({
-        error: 'Invalid status. Use "verified" or "rejected".'
-      });
+      return errorResponse(res, 'Invalid status. Use "verified" or "rejected".', 400);
     }
 
     const { data, error } = await supabase
@@ -182,9 +169,7 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({
-          error: 'Payment record not found'
-        });
+        return errorResponse(res, 'Payment record not found', 404);
       }
       throw error;
     }
@@ -201,17 +186,11 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
       ip: req.ip
     });
 
-    res.json({
-      success: true,
-      message: `Payment ${status} successfully`,
-      payment: data
-    });
+    return successResponse(res, { payment: data }, `Payment ${status} successfully`);
 
   } catch (error) {
     console.error('Payment verification error:', error);
-    res.status(500).json({
-      error: 'Failed to verify payment'
-    });
+    return errorResponse(res, 'Failed to verify payment', 500, error);
   }
 });
 
@@ -254,19 +233,17 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 
     if (countError) throw countError;
 
-    res.json({
+    return successResponse(res, {
       total_payments: totalCount || 0,
       total_amount: totalAmount || 0,
       verified_amount: verifiedAmount || 0,
       pending_count: pendingCount || 0,
       verified_count: verifiedData?.length || 0
-    });
+    }, 'Payment statistics retrieved successfully');
 
   } catch (error) {
     console.error('Payment stats error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch payment statistics'
-    });
+    return errorResponse(res, 'Failed to fetch payment statistics', 500, error);
   }
 });
 
