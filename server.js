@@ -50,7 +50,7 @@ app.use(helmet({
 // CORS configuration
 const allowedOrigins = [
   'https://nacos-tau-portal.netlify.app',
-  'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
+  // 'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
   'http://localhost:5500',
   'http://localhost:8080',
   'http://localhost:3000',
