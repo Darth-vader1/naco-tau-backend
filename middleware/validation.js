@@ -10,6 +10,7 @@
 // 400 responses, reduce boilerplate, and guarantee consistent errors.
 
 const { body, param, query, validationResult } = require('express-validator');
+const { validateMatricNo } = require('../utils/validators');
 
 /**
  * Checks the validation result and returns 400 with structured errors
@@ -20,8 +21,9 @@ const validate = (req, res, next) => {
   if (errors.isEmpty()) return next();
   const mapped = {};
   for (const err of errors.array()) {
-    if (!mapped[err.param]) mapped[err.param] = [];
-    mapped[err.param].push(err.msg);
+    const field = err.param || err.path || 'unknown';
+    if (!mapped[field]) mapped[field] = [];
+    mapped[field].push(err.msg);
   }
   return res.status(400).json({
     success: false,
@@ -59,9 +61,9 @@ const authValidationChains = {
       .trim().escape(),
     body('matricNo')
       .exists().withMessage('matricNo is required').bail()
-      .custom((value) => /^TAU\/[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i.test(value) ||
-                             /^\d{2}\/\d{2}[A-Z]{2,4}\d{3,4}$/i.test(value))
-      .withMessage('matricNo format is not valid (examples: TAU/CS/20/001, 23/10MSC014)'),
+      .trim()
+      .custom((value) => validateMatricNo(value))
+      .withMessage('matricNo format is not valid (example: 23/10MSC014)'),
     body('department').optional()
       .isLength({ max: 100 }).withMessage('department max 100 chars').trim().escape(),
     body('phone').optional()
@@ -127,9 +129,9 @@ const studentValidationChains = {
 
   listQuery: [
     query('page').optional().isInt({ min: 1 }).withMessage('page must be an int >= 1').toInt(),
-    query('limit').optional().isInt({ min: 1, max: 200 }).withMessage('limit must be 1-200').toInt(),
+    query('limit').optional().isInt({ min: 1, max: 1000 }).withMessage('limit must be 1-1000').toInt(),
     query('status').optional()
-      .isIn(['pending', 'active', 'rejected', 'banned']).withMessage('status filter not valid'),
+      .isIn(['pending', 'active', 'rejected', 'banned', 'all']).withMessage('status filter not valid'),
     query('search').optional().isLength({ max: 100 }).trim().escape()
   ]
 };
@@ -144,7 +146,7 @@ const idParam = (name = 'id') => [
 
 const paginationQuery = [
   query('page').optional().isInt({ min: 1 }).withMessage('page must be an int >= 1').toInt(),
-  query('limit').optional().isInt({ min: 1, max: 200 }).withMessage('limit must be 1-200').toInt(),
+  query('limit').optional().isInt({ min: 1, max: 1000 }).withMessage('limit must be 1-1000').toInt(),
   query('search').optional().isLength({ max: 100 }).trim().escape()
 ];
 

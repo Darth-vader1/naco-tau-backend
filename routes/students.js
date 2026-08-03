@@ -7,17 +7,48 @@ const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { studentValidationChains, idParam, paginationQuery, validate } = require('../middleware/validation');
 
+/**
+ * Permanently (HARD) delete a Supabase Auth user. Mirrors the helper in
+ * routes/auth.js because routes/students.js is its own file and we don't
+ * want a cross-import of module-level helpers. See auth.js helper docblock
+ * for the soft-vs-hard delete rationale: soft delete keeps the email
+ * blocked and hides rows from Dashboard Users view.
+ */
+const permanentlyDeleteAuthUser = async (userId) => {
+  if (!userId) return;
+  let lastErr = null;
+  try {
+    const { error } = await supabase.auth.admin.deleteUser(userId, true);
+    if (!error) return;
+    lastErr = error;
+  } catch (e) {
+    lastErr = e;
+  }
+  try {
+    const { error } = await supabase
+      .rpc('auth_delete_user_permanent', { user_id: userId });
+    if (!error) return;
+    lastErr = error;
+  } catch (_) { /* rpc may not exist */ }
+  try {
+    const { error } = await supabase.from('users').delete().eq('id', userId);
+    if (!error) return;
+    lastErr = error;
+  } catch (_) { /* RLS may block; expected */ }
+  console.warn('[students.js] permanentlyDeleteAuthUser: all branches failed for', userId, 'last error:', lastErr?.message || lastErr);
+};
+
 // ============================================
 // GET ALL STUDENTS (Admin)
 // ============================================
 router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
-      search, 
+    const {
+      page = 1,
+      limit = 20,
+      search,
       status,
-      department 
+      department
     } = req.query;
     const offset = (page - 1) * limit;
 
@@ -25,20 +56,25 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
       .from('students')
       .select('*', { count: 'exact' });
 
-    if (search) {
+    if (search && String(search).trim() !== '') {
+      const s = String(search).trim();
       query = query.or(
-        `name.ilike.%${search}%,` +
-        `matric_no.ilike.%${search}%,` +
-        `email.ilike.%${search}%`
+        `name.ilike.%${s}%,` +
+        `matric_no.ilike.%${s}%,` +
+        `email.ilike.%${s}%`
       );
     }
 
-    if (status) {
-      query = query.eq('status', status);
+    // status === 'all' means "no filter" — we must NOT add an eq('status','all')
+    // clause, because no student row has that value, so the result set becomes
+    // empty even though records exist.
+    const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+    if (normalizedStatus && normalizedStatus !== 'all') {
+      query = query.eq('status', normalizedStatus);
     }
 
-    if (department) {
-      query = query.eq('department', department);
+    if (department && String(department).trim() !== '') {
+      query = query.eq('department', String(department).trim());
     }
 
     const { data, error, count } = await query
@@ -85,9 +121,9 @@ router.get('/pending', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// ============================================
-// VERIFY STUDENT (Admin)
-// ============================================
+// VERIFY STUDENT (Admin) - LEGACY ENDPOINT KEPT FOR BACKWARD COMPATIBILITY.
+// Note: students are now auto-activated on signup (status='active'), so this route
+// is rarely used in the new flow. Kept available for manual admin overrides / re-activation.
 router.put('/:id/verify', authenticate, requireAdmin, idParam('id'), validate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -274,10 +310,11 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
 
     if (deleteError) throw deleteError;
 
-    // Delete auth user (if exists)
+    // Delete auth user (if exists) — MUST use permanent (hard) delete,
+    // otherwise the soft-deleted orphan blocks any future re-registration
+    // of the same email and remains invisible in the default Dashboard view.
     if (student.user_id) {
-      await supabase.auth.admin.deleteUser(student.user_id)
-        .catch(err => console.error('Auth user deletion error:', err));
+      await permanentlyDeleteAuthUser(student.user_id);
     }
 
     // Log deletion

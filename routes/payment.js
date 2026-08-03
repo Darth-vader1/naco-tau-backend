@@ -9,6 +9,8 @@ const { successResponse, errorResponse } = require('../utils/helpers');
 // ============================================
 // SUBMIT PAYMENT (Student)
 // ============================================
+const VALID_PAYMENT_TYPES = ['association_fee', 'event_registration', 'other'];
+
 router.post('/submit', authenticate, async (req, res) => {
   try {
     const {
@@ -16,11 +18,37 @@ router.post('/submit', authenticate, async (req, res) => {
       payment_type,
       transaction_id,
       payment_proof_url,
-      description
+      description,
+      event_id
     } = req.body;
 
     if (!amount || !payment_type || !payment_proof_url) {
       return errorResponse(res, 'Amount, payment type, and proof are required', 400);
+    }
+
+    if (!VALID_PAYMENT_TYPES.includes(payment_type)) {
+      return errorResponse(res, `Invalid payment_type. Use one of: ${VALID_PAYMENT_TYPES.join(', ')}`, 400);
+    }
+
+    // Event registration payments MUST be linked to a specific event.
+    if (payment_type === 'event_registration' && !event_id) {
+      return errorResponse(res, 'event_id is required for event_registration payments.', 400);
+    }
+
+    // If event_id is provided, confirm the target event actually exists.
+    let resolvedEventId = null;
+    if (event_id) {
+      const { data: targetEvent, error: evErr } = await supabase
+        .from('events')
+        .select('id')
+        .eq('id', event_id)
+        .maybeSingle();
+
+      if (evErr) throw evErr;
+      if (!targetEvent) {
+        return errorResponse(res, `Event ${event_id} does not exist.`, 400);
+      }
+      resolvedEventId = targetEvent.id;
     }
 
     const { data, error } = await supabase
@@ -32,6 +60,7 @@ router.post('/submit', authenticate, async (req, res) => {
         transaction_id: transaction_id || `NACOS-${Date.now()}`,
         payment_proof_url,
         description,
+        event_id: resolvedEventId,
         status: 'pending',
         submitted_at: new Date().toISOString()
       }])
@@ -46,7 +75,8 @@ router.post('/submit', authenticate, async (req, res) => {
       details: { 
         payment_id: data.id,
         amount: data.amount,
-        type: data.payment_type
+        type: data.payment_type,
+        event_id: data.event_id || null
       },
       ip: req.ip
     });
@@ -181,10 +211,68 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
         payment_id: id,
         amount: data.amount,
         student: data.students.name,
-        status: status
+        status: status,
+        event_id: data.event_id || null
       },
       ip: req.ip
     });
+
+    // ============================================
+    // AUTO-REGISTER FOR EVENT (HIGH-4 fix)
+    // When a verified event_registration payment is approved, create (or upsert)
+    // the student's event_registration row — so the student doesn't have to
+    // manually come back and register themselves.
+    // If rejected, remove any previously-created auto-registration (if any).
+    // ============================================
+    if (data.payment_type === 'event_registration' && data.event_id && data.user_id) {
+      try {
+        if (status === 'verified') {
+          const { error: regErr } = await supabase
+            .from('event_registrations')
+            .upsert(
+              [{
+                event_id: data.event_id,
+                user_id: data.user_id,
+                registration_date: new Date().toISOString(),
+                status: 'registered',
+                linked_payment_id: data.id
+              }],
+              { onConflict: 'event_id,user_id', ignoreDuplicates: false }
+            );
+
+          if (regErr) throw regErr;
+
+          await auditLog({
+            action: 'event_registration_auto_created',
+            userId: req.userId,
+            details: {
+              event_id: data.event_id,
+              student_id: data.user_id,
+              payment_id: data.id,
+              amount: data.amount
+            },
+            ip: req.ip
+          });
+        } else if (status === 'rejected') {
+          // If admin rejects the proof, revoke any auto-created registration
+          // that was linked to this specific payment (to keep manual registrations intact).
+          await supabase
+            .from('event_registrations')
+            .delete()
+            .eq('event_id', data.event_id)
+            .eq('user_id', data.user_id)
+            .eq('linked_payment_id', data.id);
+        }
+      } catch (autoErr) {
+        console.error('Auto event registration sync error:', autoErr);
+        return errorResponse(
+          res,
+          `Payment ${status}, but automatic event registration could not be synced. Please register the student manually.`,
+          502,
+          autoErr
+        );
+      }
+    }
 
     return successResponse(res, { payment: data }, `Payment ${status} successfully`);
 

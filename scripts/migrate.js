@@ -487,6 +487,7 @@ async function migrate() {
         const buckets = [
             'resources',
             'timetables',
+            'past-questions',
             'profile-pictures',
             'event-images',
             'payment-proofs',

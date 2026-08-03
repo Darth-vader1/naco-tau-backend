@@ -194,6 +194,65 @@ router.post('/:id/register', authenticate, async (req, res) => {
       return errorResponse(res, 'You are already registered for this event', 409);
     }
 
+    // ============================================
+    // PAID EVENT GATE (CRITICAL-4 fix)
+    // Require verified payment if event requires one.
+    // ============================================
+    let verifiedPaymentId = null;
+    if (event.requires_payment && Number(event.payment_amount) > 0) {
+      const { data: verifiedPayment, error: payErr } = await supabase
+        .from('payments')
+        .select('id, amount')
+        .eq('user_id', req.userId)
+        .eq('event_id', event.id)
+        .eq('payment_type', 'event_registration')
+        .eq('status', 'verified')
+        .order('submitted_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (payErr) throw payErr;
+
+      if (!verifiedPayment) {
+        return errorResponse(
+          res,
+          `This is a paid event (₦${Number(event.payment_amount).toLocaleString()}). Submit an event_registration payment proof and get it verified first, then return to register.`,
+          402
+        );
+      }
+
+      if (Number(verifiedPayment.amount) < Number(event.payment_amount)) {
+        return errorResponse(
+          res,
+          `Verified amount (₦${Number(verifiedPayment.amount).toLocaleString()}) is less than the required event fee (₦${Number(event.payment_amount).toLocaleString()}).`,
+          402
+        );
+      }
+
+      verifiedPaymentId = verifiedPayment.id;
+    }
+
+    // ============================================
+    // CAPACITY GATE (CRITICAL-5 fix)
+    // Reject overflow when registrations reach event.max_attendees.
+    // ============================================
+    if (typeof event.max_attendees === 'number' && event.max_attendees > 0) {
+      const { count, error: cntErr } = await supabase
+        .from('event_registrations')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', event.id);
+
+      if (cntErr) throw cntErr;
+
+      if ((count ?? 0) >= event.max_attendees) {
+        return errorResponse(
+          res,
+          `Event is fully booked (${event.max_attendees} / ${event.max_attendees} seats filled). Join the waitlist or contact the exco.`,
+          409
+        );
+      }
+    }
+
     // Register user
     const { data, error } = await supabase
       .from('event_registrations')
@@ -201,7 +260,8 @@ router.post('/:id/register', authenticate, async (req, res) => {
         event_id: id,
         user_id: req.userId,
         registration_date: new Date().toISOString(),
-        status: 'registered'
+        status: 'registered',
+        linked_payment_id: verifiedPaymentId
       }])
       .select()
       .single();

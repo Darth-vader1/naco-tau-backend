@@ -113,6 +113,36 @@ CREATE TABLE timetables (
 );
 
 -- ============================================
+-- PAST QUESTIONS
+-- ============================================
+CREATE TABLE past_questions (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  title TEXT,
+  course_code TEXT NOT NULL,
+  course_name TEXT,
+  level TEXT,
+  semester TEXT,
+  file_url TEXT NOT NULL,
+  file_type TEXT,
+  uploaded_by UUID REFERENCES admin_users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================
+-- PAYMENT VERIFICATION
+-- ============================================
+CREATE TABLE payment_verification (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  student_id UUID REFERENCES students(id) ON DELETE CASCADE,
+  event_id UUID REFERENCES events(id) ON DELETE CASCADE,
+  amount NUMERIC(10,2),
+  payment_reference TEXT,
+  proof_url TEXT,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================
 -- CAREER PATHS
 -- ============================================
 CREATE TABLE career_paths (
@@ -222,10 +252,14 @@ CREATE TABLE login_history (
 CREATE TABLE audit_logs (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   action TEXT NOT NULL,
+  admin_id UUID REFERENCES admin_users(id) ON DELETE SET NULL,
   user_id UUID REFERENCES students(user_id) ON DELETE SET NULL,
   user_email TEXT,
+  entity_type TEXT,
+  entity_id UUID,
   details JSONB,
   ip_address TEXT,
+  user_agent TEXT,
   timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -261,11 +295,19 @@ CREATE INDEX idx_payments_user_id ON payments(user_id);
 CREATE INDEX idx_votes_voter_id ON votes(voter_id);
 CREATE INDEX idx_votes_position_id ON votes(position_id);
 CREATE INDEX idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX idx_audit_logs_admin_id ON audit_logs(admin_id);
+CREATE INDEX idx_audit_logs_entity_type ON audit_logs(entity_type);
+CREATE INDEX idx_audit_logs_entity_id ON audit_logs(entity_id);
 CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_resources_type ON academic_resources(resource_type);
 CREATE INDEX IF NOT EXISTS idx_timetables_department ON timetables(department);
 CREATE INDEX IF NOT EXISTS idx_resource_views_resource_id ON resource_views(resource_id);
 CREATE INDEX IF NOT EXISTS idx_resource_downloads_resource_id ON resource_downloads(resource_id);
+CREATE INDEX IF NOT EXISTS idx_payment_verification_created_at ON payment_verification(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_verification_student_id ON payment_verification(student_id);
+CREATE INDEX IF NOT EXISTS idx_payment_verification_status ON payment_verification(status);
+CREATE INDEX IF NOT EXISTS idx_past_questions_course_code ON past_questions(course_code);
+CREATE INDEX IF NOT EXISTS idx_past_questions_level ON past_questions(level);
 
 -- ============================================
 -- ROW LEVEL SECURITY (RLS)
@@ -278,6 +320,8 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_registrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE academic_resources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE timetables ENABLE ROW LEVEL SECURITY;
+ALTER TABLE past_questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_verification ENABLE ROW LEVEL SECURITY;
 ALTER TABLE career_paths ENABLE ROW LEVEL SECURITY;
 ALTER TABLE saved_careers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE voting_positions ENABLE ROW LEVEL SECURITY;
@@ -306,6 +350,13 @@ CREATE POLICY "resources_select_authenticated" ON academic_resources FOR SELECT 
 
 -- Timetables: read-only for authenticated users
 CREATE POLICY "timetables_select_authenticated" ON timetables FOR SELECT TO authenticated USING (true);
+
+-- Past questions: read-only for authenticated users
+CREATE POLICY "past_questions_select_authenticated" ON past_questions FOR SELECT TO authenticated USING (true);
+
+-- Payment verification: read own submissions
+CREATE POLICY "payment_verification_select_own" ON payment_verification FOR SELECT USING (student_id IN (SELECT id FROM students WHERE user_id = auth.uid()));
+CREATE POLICY "payment_verification_insert_own" ON payment_verification FOR INSERT WITH CHECK (student_id IN (SELECT id FROM students WHERE user_id = auth.uid()));
 
 -- Career paths: public read for active entries
 CREATE POLICY "careers_select_public" ON career_paths FOR SELECT USING (is_active = true);

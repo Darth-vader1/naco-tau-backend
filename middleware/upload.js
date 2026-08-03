@@ -6,6 +6,63 @@ const { supabase } = require('../config/supabase');
 const { validateFileType, getReadableFileSize } = require('../utils/validators');
 
 // ============================================
+// DEDICATED STORAGE BUCKETS
+// Single source of truth for all 7 buckets provisioned in Supabase Storage.
+// Every upload flow (both middleware helpers and route-level direct uploads)
+// should resolve logical flow keys through `resolveBucketFor()` so that all
+// uploads land in the right bucket — never the legacy monolithic one.
+// ============================================
+
+const BUCKETS = Object.freeze({
+  PAST_QUESTIONS: 'past-questions',
+  TIMETABLES: 'timetables',
+  RESOURCES: 'resources',
+  EVENT_IMAGES: 'event-images',
+  PAYMENT_PROOFS: 'payment-proofs',
+  PROFILE_PICTURES: 'profile-pictures',
+  VOTING_PHOTOS: 'voting-photos'
+});
+
+const ALLOWED_BUCKETS = Object.freeze(Object.values(BUCKETS));
+
+const BUCKET_MAP = Object.freeze({
+  events: BUCKETS.EVENT_IMAGES,
+  event_images: BUCKETS.EVENT_IMAGES,
+  'event-images': BUCKETS.EVENT_IMAGES,
+  past_questions: BUCKETS.PAST_QUESTIONS,
+  'past-questions': BUCKETS.PAST_QUESTIONS,
+  pastQuestions: BUCKETS.PAST_QUESTIONS,
+  timetables: BUCKETS.TIMETABLES,
+  timetable: BUCKETS.TIMETABLES,
+  resources: BUCKETS.RESOURCES,
+  academic_resources: BUCKETS.RESOURCES,
+  'academic-resources': BUCKETS.RESOURCES,
+  profile_pictures: BUCKETS.PROFILE_PICTURES,
+  'profile-pictures': BUCKETS.PROFILE_PICTURES,
+  profile: BUCKETS.PROFILE_PICTURES,
+  avatar: BUCKETS.PROFILE_PICTURES,
+  payment_proofs: BUCKETS.PAYMENT_PROOFS,
+  'payment-proofs': BUCKETS.PAYMENT_PROOFS,
+  payment: BUCKETS.PAYMENT_PROOFS,
+  voting_photos: BUCKETS.VOTING_PHOTOS,
+  'voting-photos': BUCKETS.VOTING_PHOTOS,
+  voting: BUCKETS.VOTING_PHOTOS,
+  candidates: BUCKETS.VOTING_PHOTOS
+});
+
+function resolveBucketFor(folderOrKey, fallback) {
+  if (!folderOrKey) return fallback || null;
+  const key = String(folderOrKey).trim().toLowerCase();
+  if (BUCKET_MAP[key]) return BUCKET_MAP[key];
+  if (ALLOWED_BUCKETS.includes(key)) return key;
+  return fallback || null;
+}
+
+function isAllowedBucket(bucket) {
+  return ALLOWED_BUCKETS.includes(bucket);
+}
+
+// ============================================
 // MULTER CONFIGURATION
 // ============================================
 
@@ -48,11 +105,25 @@ const upload = multer({
 
 /**
  * Upload file to Supabase Storage
+ *
+ * Accepts either a raw bucket name OR a logical flow key — `resolveBucketFor`
+ * maps it to one of the 7 dedicated buckets. Throws if the resolved bucket
+ * isn't in the ALLOWED_BUCKETS whitelist, so direct callers can't write to
+ * arbitrary buckets even if called outside the `uploadToBucket` middleware.
  */
-const uploadToSupabase = async (file, bucket, folder = '') => {
+const uploadToSupabase = async (file, bucketOrKey, folder = '') => {
     try {
         if (!file) {
             throw new Error('No file provided');
+        }
+
+        const bucket = resolveBucketFor(bucketOrKey, bucketOrKey);
+        if (!bucket || !isAllowedBucket(bucket)) {
+            throw new Error(
+                `Bucket or flow key not allowed: "${bucketOrKey}". ` +
+                `Allowed buckets: ${ALLOWED_BUCKETS.join(', ')} ` +
+                `(or logical keys: events/past_questions/timetables/resources/profile_pictures/payment_proofs/voting_photos).`
+            );
         }
 
         // Generate unique filename
@@ -83,6 +154,7 @@ const uploadToSupabase = async (file, bucket, folder = '') => {
         return {
             url: urlData.publicUrl,
             path: filePath,
+            bucket,
             fileName: file.originalname,
             fileSize: file.size,
             fileType: file.mimetype,
@@ -98,10 +170,17 @@ const uploadToSupabase = async (file, bucket, folder = '') => {
 /**
  * Delete file from Supabase Storage
  */
-const deleteFromSupabase = async (bucket, filePath) => {
+const deleteFromSupabase = async (bucketOrKey, filePath) => {
     try {
         if (!filePath) {
             return;
+        }
+
+        const bucket = resolveBucketFor(bucketOrKey, bucketOrKey);
+        if (!bucket || !isAllowedBucket(bucket)) {
+            throw new Error(
+                `Bucket or flow key not allowed for deletion: "${bucketOrKey}". Allowed: ${ALLOWED_BUCKETS.join(', ')}.`
+            );
         }
 
         const { error } = await supabase.storage
@@ -123,10 +202,12 @@ const deleteFromSupabase = async (bucket, filePath) => {
 /**
  * Get file URL from Supabase Storage
  */
-const getFileUrl = (bucket, filePath) => {
+const getFileUrl = (bucketOrKey, filePath) => {
     if (!filePath) return null;
+    const bucket = resolveBucketFor(bucketOrKey, bucketOrKey);
+    if (!bucket || !isAllowedBucket(bucket)) return null;
     const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
-    return data.publicUrl;
+    return data?.publicUrl ?? null;
 };
 
 // ============================================
@@ -185,11 +266,20 @@ const uploadMultiple = (fieldName, maxCount = 5) => {
 };
 
 // Upload with specific bucket and folder
-const uploadToBucket = (bucket, folder = '') => {
+// Accepts either a raw bucket name (e.g. 'event-images') or a logical folder
+// key (e.g. 'events') — resolveBucketFor maps it to the dedicated bucket.
+const uploadToBucket = (bucketOrKey, folder = '') => {
     return async (req, res, next) => {
         try {
             if (!req.file && !req.files) {
                 return next();
+            }
+
+            const bucket = resolveBucketFor(bucketOrKey, bucketOrKey);
+            if (!isAllowedBucket(bucket)) {
+                return res.status(400).json({
+                    error: `Invalid bucket or flow key "${bucketOrKey}". Allowed buckets: ${ALLOWED_BUCKETS.join(', ')}.`
+                });
             }
 
             const files = req.files || [req.file];
@@ -201,6 +291,7 @@ const uploadToBucket = (bucket, folder = '') => {
             }
 
             req.uploadedFiles = uploadResults;
+            req.resolvedBucket = bucket;
             next();
 
         } catch (error) {
@@ -239,6 +330,11 @@ const validateFileSize = (file, maxSizeInMB = 10) => {
 // ============================================
 
 module.exports = {
+    BUCKETS,
+    ALLOWED_BUCKETS,
+    BUCKET_MAP,
+    resolveBucketFor,
+    isAllowedBucket,
     upload,
     uploadSingle,
     uploadMultiple,

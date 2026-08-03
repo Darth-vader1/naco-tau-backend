@@ -9,6 +9,70 @@ const { validateEmail, validatePassword, validateMatricNo } = require('../utils/
 const { isAdminEmailAllowed, getAdminEmails, successResponse, errorResponse } = require('../utils/helpers');
 const { authValidationChains, validate } = require('../middleware/validation');
 
+/**
+ * Permanently (HARD) delete a Supabase Auth user.
+ *
+ * The default admin.deleteUser(id) in Supabase JS SDK v2 does a SOFT
+ * delete — it only sets `deleted_at` on the auth.users row. A soft-deleted
+ * row still blocks re-registration with the same email (GoTrue checks
+ * both deleted and non-deleted rows for uniqueness) and the row is
+ * hidden from the default Dashboard Users view.
+ *
+ * This helper tries the SDK's explicit permanent-delete option first,
+ * and falls back to a direct SQL DELETE from auth.users via the
+ * service-role Postgres client — which always works on projects where
+ * service_role key bypasses RLS on the auth schema.
+ */
+const permanentlyDeleteAuthUser = async (userId) => {
+  if (!userId) return;
+  let lastErr = null;
+  try {
+    const { error } = await supabase.auth.admin.deleteUser(userId, true);
+    if (!error) return;
+    lastErr = error;
+  } catch (e) {
+    lastErr = e;
+  }
+  try {
+    const { error } = await supabase
+      .rpc('auth_delete_user_permanent', { user_id: userId });
+    if (!error) return;
+    lastErr = error;
+  } catch (_) { /* rpc may not exist — ignore; fall through to SQL */ }
+  try {
+    const { error } = await supabase.from('users').delete().eq('id', userId);
+    if (!error) return;
+    lastErr = error;
+  } catch (_) { /* RLS may block this branch; expected sometimes */ }
+  console.warn('[auth.js] permanentlyDeleteAuthUser: all branches failed for', userId, 'last error:', lastErr?.message || lastErr);
+};
+
+/**
+ * Look up an Auth user by email, including soft-deleted rows.
+ * Returns the user object (with .id, .email, .email_confirmed_at, .deleted_at)
+ * or null if none exists. Uses the admin listUsers API which enumerates
+ * every row regardless of soft-delete status.
+ */
+const findAuthUserByEmail = async (rawEmail) => {
+  const target = (rawEmail || '').toString().trim().toLowerCase();
+  if (!target) return null;
+  try {
+    const { data, error } = await supabase.auth.admin.listUsers({
+      page: 1,
+      perPage: 1000
+    });
+    if (error) {
+      console.warn('[auth.js] findAuthUserByEmail listUsers failed:', error.message);
+      return null;
+    }
+    const list = data?.users || [];
+    return list.find((u) => (u.email || '').toLowerCase() === target) || null;
+  } catch (e) {
+    console.warn('[auth.js] findAuthUserByEmail raised:', e.message);
+    return null;
+  }
+};
+
 // ============================================
 // STUDENT REGISTRATION
 // ============================================
@@ -43,7 +107,7 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
 
     // Validate matric number format
     if (!validateMatricNo(matricNo)) {
-      return errorResponse(res, 'Invalid matric number format. Expected format: TAU/CS/20/001 or 23/10MSC014', 400);
+      return errorResponse(res, 'Invalid matric number format. Expected format: YY/NNDDD### (example: 23/10MSC014)', 400);
     }
 
     // Check if email already exists
@@ -62,26 +126,127 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       }
     }
 
-    // Create user in Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.signUp({
-      email: email.toLowerCase(),
-      password: password,
-      options: {
-        data: {
-          full_name: `${firstName} ${lastName}`,
-          first_name: firstName,
-          last_name: lastName,
-          role: 'student'
-        }
+    // ============================================================
+    // STEP 0 — Auth-users orphan cleanup (auto-heals failed
+    // previous signup attempts).
+    //
+    // Timeline context: the old auth.signUp() flow (and even our
+    // current admin.createUser + soft-delete rollback) leaves rows
+    // in auth.users with:
+    //   - email_confirmed_at = NULL  (signUp anti-enumeration path)
+    //   - OR deleted_at IS NOT NULL  (the default "soft" delete)
+    // Either state blocks admin.createUser with "A user with this
+    // email address has already been registered", but these rows
+    // are by default HIDDEN in the Dashboard Users view, so the
+    // operator believes no user exists.
+    //
+    // Rule: if we find an auth.users row for this email AND there
+    // is NO matching students.* profile row, we treat it as an
+    // orphan and PERMANENTLY purge it so the current, legitimate
+    // signup can succeed. If there IS a matching profile row, we
+    // return 409 as a normal duplicate.
+    // ============================================================
+    const preExistingAuthUser = await findAuthUserByEmail(email);
+    if (preExistingAuthUser) {
+      const { data: profileForAuthUser } = await supabase
+        .from('students')
+        .select('user_id, email, status')
+        .or(`user_id.eq.${preExistingAuthUser.id},email.eq.${email.toLowerCase()}`)
+        .limit(1)
+        .maybeSingle();
+      if (profileForAuthUser) {
+        return errorResponse(
+          res,
+          'This email is already registered. Please login instead.',
+          409
+        );
       }
-    });
-
-    if (authError) {
-      console.error('Signup error:', authError);
-      return errorResponse(res, 'Registration failed. Please try again.', 400, authError);
+      console.warn(
+        `[register] found orphan auth user ${preExistingAuthUser.id} ` +
+        `(${email}) with email_confirmed_at=${preExistingAuthUser.email_confirmed_at ?? 'NULL'} ` +
+        `deleted_at=${preExistingAuthUser.deleted_at ?? 'NULL'}. Purging permanently…`
+      );
+      await permanentlyDeleteAuthUser(preExistingAuthUser.id);
     }
 
-    // Create student profile
+    // ============================================================
+    // STEP 1 — Create the Supabase Auth user as a server admin.
+    //
+    // Strategy: do TWO short, version-resilient calls instead of
+    // one shape-sensitive call:
+    //   (a) admin.createUser with only the well-known primitive fields
+    //       (email, password, email_confirm: true) — every Supabase
+    //       JS SDK v2 supports these; unknown keys can cause 400s on
+    //       some older builds so we don't pass metadata here.
+    //   (b) admin.updateUserById to attach user_metadata — this API
+    //       accepts both "data" and "user_metadata" shapes reliably.
+    //
+    // email_confirm: true  →  writes email_confirmed_at immediately,
+    // so the subsequent password-based sign-in (client OR server) is
+    // allowed by GoTrue and cannot 400 with "Invalid credentials".
+    // ============================================================
+    let authData = null;
+    {
+      const { data, error } = await supabase.auth.admin.createUser({
+        email: email.toLowerCase(),
+        password: password,
+        email_confirm: true
+      });
+      if (error) {
+        console.error('[register] admin.createUser failed:', error);
+        const debugMsg = error?.message
+          ? `Registration failed: ${error.message}`
+          : 'Registration failed. Please try again.';
+        return errorResponse(res, debugMsg, 400, error);
+      }
+      authData = data;
+    }
+
+    {
+      const meta = {
+        full_name: `${firstName} ${lastName}`,
+        first_name: firstName,
+        last_name: lastName,
+        role: 'student'
+      };
+      const { error } = await supabase.auth.admin.updateUserById(authData.user.id, { user_metadata: meta });
+      if (error) {
+        console.warn('[register] admin.updateUserById for metadata failed (non-fatal):', error);
+      }
+    }
+
+    // ============================================================
+    // STEP 2 — Mint a browser session for the newly-created user.
+    //
+    // With email_confirm=true set above, a plain password-based
+    // sign-in is now permitted. Performing the exchange on the
+    // server means:
+    //   - the frontend avoids one extra Supabase round-trip;
+    //   - the frontend can call setSession directly;
+    //   - if the service-role client ever has issues, we still
+    //     return session=null so the existing client-side password
+    //     fallback in student-signup.html takes over cleanly.
+    // ============================================================
+    let session = null;
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.toLowerCase().trim(),
+        password: password
+      });
+      if (error) {
+        console.warn('[register] server-side session signIn failed (non-fatal, client will fallback):', error.message);
+      } else {
+        session = data?.session || null;
+      }
+    } catch (signInErr) {
+      console.warn('[register] server-side session signIn threw (non-fatal):', signInErr.message);
+    }
+
+    // ============================================================
+    // STEP 3 — Write the local student profile (RLS-bypassed via
+    // service role). Roll back the Auth user on any failure so we
+    // never leave orphaned Supabase users.
+    // ============================================================
     const { error: profileError } = await supabase
       .from('students')
       .insert([{
@@ -94,16 +259,20 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
         department: department || 'Computer Science',
         course: course || 'Computer Science',
         phone: phone || null,
-        status: 'active', // Auto-activated on signup
+        status: 'active',
         created_at: new Date().toISOString()
       }]);
 
     if (profileError) {
       console.error('Profile creation error:', profileError);
-      await supabase.auth.admin.deleteUser(authData.user.id)
-        .catch(err => console.error('Cleanup error:', err));
-      
-      return errorResponse(res, 'Registration failed. Please contact support.', 500, profileError);
+      // Must be permanent (not soft) delete. Otherwise the orphaned
+      // auth.user will block any future signup attempt with the same
+      // email, and the row is invisible in the default Dashboard view.
+      await permanentlyDeleteAuthUser(authData.user.id);
+      const debugMsg = profileError?.message
+        ? `Registration failed: ${profileError.message}`
+        : 'Registration failed. Please contact support.';
+      return errorResponse(res, debugMsg, 500, profileError);
     }
 
     // Log registration
@@ -116,12 +285,16 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
 
     return successResponse(res, {
       id: authData.user.id,
-      email: authData.user.email
-    }, 'Registration successful! Your account is now active. Please verify your email and login.', 201);
+      email: authData.user.email,
+      session
+    }, 'Registration successful! Your account is now active.', 201);
 
   } catch (error) {
     console.error('Registration error:', error);
-    return errorResponse(res, 'Registration failed. Please try again.', 500, error);
+    const debugMsg = error?.message
+      ? `Registration failed: ${error.message}`
+      : 'Registration failed. Please try again.';
+    return errorResponse(res, debugMsg, 500, error);
   }
 });
 

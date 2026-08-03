@@ -28,6 +28,9 @@ const resourceRoutes = require('./routes/resources');
 const timetableRoutes = require('./routes/timetable');
 const careerRoutes = require('./routes/career');
 const paymentRoutes = require('./routes/payment');
+const storageRoutes = require('./routes/storage');
+const uploadRoutes = require('./routes/upload');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 
@@ -110,6 +113,15 @@ app.use('/api/resources', resourceRoutes);
 app.use('/api/timetables', timetableRoutes);
 app.use('/api/career', careerRoutes);
 app.use('/api/payments', paymentRoutes);
+// Storage admin routes (service_role backed, admin only)
+app.use('/api/storage', storageRoutes);
+// File upload/delete/list routes (generic bucket-key paths: /upload/:bucket, etc.)
+// Upload router already uses path params like `/upload/:bucket` internally, so
+// mount at `/api` to produce `/api/upload/:bucket`, `/api/delete/:bucket`, etc.
+app.use('/api', uploadRoutes);
+// Admin-only generic table write pass-through (events/past_questions/timetables/etc.)
+// Uses service_role client to bypass anon-key RLS 42501 INSERT violations.
+app.use('/api/admin', adminRoutes);
 
 // Serve root and fallback to index.html for frontend routes
 app.get('/', (req, res) => {

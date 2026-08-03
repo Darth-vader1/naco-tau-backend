@@ -83,58 +83,42 @@ const getPasswordStrength = (password) => {
 
 /**
  * Validate TAU matric number format
- * Formats accepted:
- * - TAU/CS/20/001
- * - TAU/CS/2020/001
- * - TAU/CSC/20/001
- * - TAU/SE/20/001
- * - TAU/IT/20/001
- * - 23/10MSC014
+ * Accepted format: YY/NNDDD###
+ *   YY  -> 2-digit intake year
+ *   NN  -> 2-digit faculty/programme numeric code
+ *   DDD -> 2-4 letter departmental code
+ *   ### -> 3-4 digit serial number
+ * Example: 23/10MSC014
  */
 const validateMatricNo = (matricNo) => {
     if (!matricNo) return false;
-    
-    // Common TAU matric number patterns
-    const patterns = [
-        /^TAU\/[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i,
-        /^TAU\/[A-Z]{2,4}\/\d{2,4}\/[A-Z0-9]{3,4}$/i,
-        /^[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i,
-        /^\d{2}\/\d{2}[A-Z]{2,4}\d{3,4}$/i
-    ];
-    
+    const pattern = /^\d{2}\/\d{2}[A-Z]{2,4}\d{3,4}$/i;
     const trimmed = matricNo.trim().toUpperCase();
-    return patterns.some(pattern => pattern.test(trimmed));
+    return pattern.test(trimmed);
 };
 
 /**
- * Extract department from matric number
+ * Extract departmental code from matric number.
+ * Format: YY/NNDDD###  →  DDD letters (between 2-digit NN block and trailing ### digits)
+ * Example: 23/10MSC014  →  MSC
  */
 const extractDepartmentFromMatric = (matricNo) => {
     if (!matricNo) return null;
-    const parts = matricNo.trim().toUpperCase().split('/');
-    if (parts.length >= 3) {
-        return parts[1];
-    }
-    return null;
+    const match = matricNo.trim().toUpperCase().match(/^\d{2}\/\d{2}([A-Z]{2,4})\d{3,4}$/);
+    return match ? match[1] : null;
 };
 
 /**
- * Extract year from matric number
+ * Extract intake year from matric number.
+ * Format: YY/NNDDD###  →  YY (converted to 20YY)
+ * Example: 23/10MSC014  →  2023
  */
 const extractYearFromMatric = (matricNo) => {
     if (!matricNo) return null;
-    const parts = matricNo.trim().toUpperCase().split('/');
-    if (parts.length >= 3) {
-        const yearPart = parts[2];
-        // If year is 2 digits (20), convert to 2020
-        if (yearPart.length === 2 && !isNaN(yearPart)) {
-            return 2000 + parseInt(yearPart);
-        }
-        if (yearPart.length === 4 && !isNaN(yearPart)) {
-            return parseInt(yearPart);
-        }
-    }
-    return null;
+    const match = matricNo.trim().toUpperCase().match(/^(\d{2})\/\d{2}[A-Z]{2,4}\d{3,4}$/);
+    if (!match) return null;
+    const yy = parseInt(match[1], 10);
+    return isNaN(yy) ? null : 2000 + yy;
 };
 
 // ============================================
@@ -407,8 +391,12 @@ const sanitizeArray = (arr) => {
 /**
  * Deeply sanitize an object: all string values → sanitizeInput,
  * arrays → sanitizeArray, nested objects are recursed.
- * Fields matching known-sensitive names (password, token, secret, proof) are left
- * untouched because they are used verbatim or hashed, not rendered as HTML.
+ * Fields that contain structured identifiers, URLs, or secrets are left
+ * untouched:
+ *   - Sensitive values (password, token, secret, proof) are used verbatim.
+ *   - Structured codes with delimiters (matricNo, departmental codes, etc.)
+ *     must preserve `/` and similar characters for downstream regex validation.
+ *   - URL-bearing fields are validated separately by their route validators.
  */
 const sanitizeDeep = (value) => {
     if (value === null || value === undefined) return value;
@@ -416,7 +404,7 @@ const sanitizeDeep = (value) => {
     if (Array.isArray(value)) return sanitizeArray(value);
     if (typeof value !== 'object') return value;
 
-    const sensitiveKeys = /password|secret|token|proof|manifesto|roadmap|details/i;
+    const sensitiveKeys = /password|secret|token|proof|manifesto|roadmap|details|matric|phone|url|linkedin|github|website|avatar|image|photo|picture|logo|banner|attachment|file|document|cv|resume|portfolio/i;
     const out = {};
     for (const [k, v] of Object.entries(value)) {
         out[k] = sensitiveKeys.test(k)
