@@ -51,12 +51,13 @@ app.use(helmet({
 const allowedOrigins = [
   'https://nacos-tau-portal.netlify.app',
   // 'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
+  'http://localhost:5000',  // Backend serving frontend
   'http://localhost:5500',
   'http://localhost:8080',
   'http://localhost:3000',
+  'http://127.0.0.1:5000',
   'http://127.0.0.1:5500',
   'http://127.0.0.1:8080',
-  '*'
 ];
 
 // Add custom FRONTEND_URL from env if provided
