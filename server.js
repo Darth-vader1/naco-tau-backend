@@ -48,9 +48,37 @@ app.use(helmet({
 }));
 
 // CORS configuration
+const allowedOrigins = [
+  'https://nacos-tau-portal.netlify.app',
+  'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
+  'http://localhost:5500',
+  'http://localhost:8080',
+  'http://localhost:3000',
+  'http://127.0.0.1:5500',
+  'http://127.0.0.1:8080',
+];
+
+// Add custom FRONTEND_URL from env if provided
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://nacos-tau-chapter.netlify.app',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, Postman, or same-origin)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️ CORS blocked origin: ${origin}`);
+      callback(new Error(`Origin ${origin} not allowed by CORS policy`));
+    }
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   optionsSuccessStatus: 200
 }));
 
