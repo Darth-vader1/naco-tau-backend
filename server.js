@@ -81,8 +81,12 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
   optionsSuccessStatus: 200
 }));
+
+// Handle preflight requests explicitly for all routes
+app.options('*', cors());
 
 // Logging
 app.use(morgan('combined'));
