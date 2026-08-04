@@ -30,23 +30,87 @@ router.get('/upcoming', async (req, res) => {
 });
 
 // ============================================
-// GET PAST EVENTS
+// GET PAST EVENTS (Enhanced with filters & pagination)
 // ============================================
 router.get('/past', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    const { limit = 10 } = req.query;
+    
+    // Extract query parameters
+    const { 
+      page = 1, 
+      limit = 20, 
+      search = '', 
+      month, 
+      year, 
+      type 
+    } = req.query;
 
-    const { data, error } = await supabase
+    // Calculate pagination offset
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    // Start building query with count
+    let query = supabase
       .from('events')
-      .select('*')
-      .lt('date', today)
+      .select('*', { count: 'exact' })
+      .lt('date', today);
+
+    // Apply search filter (title or description)
+    if (search && search.trim()) {
+      const searchTerm = search.trim();
+      query = query.or(`title.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`);
+    }
+
+    // Apply year and month filters
+    if (year) {
+      if (month) {
+        // Filter by specific month and year
+        const monthPadded = String(month).padStart(2, '0');
+        const startDate = `${year}-${monthPadded}-01`;
+        
+        // Calculate last day of month
+        const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+        const endDate = `${year}-${monthPadded}-${String(lastDay).padStart(2, '0')}`;
+        
+        query = query.gte('date', startDate).lte('date', endDate);
+      } else {
+        // Filter by year only
+        query = query.gte('date', `${year}-01-01`).lte('date', `${year}-12-31`);
+      }
+    }
+
+    // Apply event type filter
+    if (type && type.trim()) {
+      query = query.eq('event_type', type.trim());
+    }
+
+    // Apply sorting and pagination
+    query = query
       .order('date', { ascending: false })
-      .limit(parseInt(limit));
+      .range(offset, offset + parseInt(limit) - 1);
+
+    // Execute query
+    const { data, error, count } = await query;
 
     if (error) throw error;
 
-    return successResponse(res, data || [], 'Past events retrieved successfully');
+    // Calculate pagination metadata
+    const totalPages = Math.ceil(count / parseInt(limit));
+    const hasMore = parseInt(page) < totalPages;
+
+    // Return data with pagination info
+    return successResponse(res, {
+      events: data || [],
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count,
+        totalPages,
+        hasMore,
+        showing: data?.length || 0
+      }
+    }, 'Past events retrieved successfully');
+
   } catch (error) {
     console.error('Past events fetch error:', error);
     return errorResponse(res, 'Failed to fetch past events', 500, error);
