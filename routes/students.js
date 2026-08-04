@@ -6,6 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { studentValidationChains, idParam, paginationQuery, validate } = require('../middleware/validation');
+const { directoryLimiter, profileViewLimiter, profileUpdateLimiter } = require('../middleware/rateLimit');
 
 /**
  * Permanently (HARD) delete a Supabase Auth user. Mirrors the helper in
@@ -99,6 +100,115 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
 });
 
 // ============================================
+// GET STUDENT DIRECTORY (Authenticated Students)
+// ============================================
+router.get('/directory', authenticate, directoryLimiter, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      search,
+      department,
+      skills,
+      interests,
+      year,
+      sort = 'name-asc'
+    } = req.query;
+
+    // Validate limit (max 100 for directory)
+    const safeLimit = Math.min(parseInt(limit) || 20, 100);
+    const offset = (parseInt(page) - 1) * safeLimit;
+
+    // Build query
+    let query = supabase
+      .from('students')
+      .select('id, name, first_name, last_name, email, phone, matric_no, department, course, year_of_study, graduation_year, profile_picture_url, bio, skills, interests, linkedin, github, twitter, instagram, snapchat, portfolio_url, visibility, privacy_settings, created_at', { count: 'exact' });
+
+    // Filter: only active students with visibility != 'private'
+    query = query
+      .eq('status', 'active')
+      .in('visibility', ['students-only', 'public']);
+
+    // Search in name and bio
+    if (search && search.trim() !== '') {
+      const searchTerm = search.trim();
+      query = query.or(
+        `name.ilike.%${searchTerm}%,` +
+        `bio.ilike.%${searchTerm}%`
+      );
+    }
+
+    // Filter by department
+    if (department && department.trim() !== '') {
+      query = query.eq('department', department.trim());
+    }
+
+    // Filter by year of study
+    if (year) {
+      query = query.eq('year_of_study', parseInt(year));
+    }
+
+    // Filter by skills (array contains)
+    if (skills && skills.trim() !== '') {
+      const skillsArray = skills.split(',').map(s => s.trim()).filter(Boolean);
+      if (skillsArray.length > 0) {
+        // Check if skills array overlaps with any of the provided skills
+        query = query.overlaps('skills', skillsArray);
+      }
+    }
+
+    // Filter by interests (array contains)
+    if (interests && interests.trim() !== '') {
+      const interestsArray = interests.split(',').map(i => i.trim()).filter(Boolean);
+      if (interestsArray.length > 0) {
+        query = query.overlaps('interests', interestsArray);
+      }
+    }
+
+    // Sorting
+    switch (sort) {
+      case 'name-desc':
+        query = query.order('name', { ascending: false });
+        break;
+      case 'recent':
+        query = query.order('created_at', { ascending: false });
+        break;
+      case 'name-asc':
+      default:
+        query = query.order('name', { ascending: true });
+        break;
+    }
+
+    // Pagination
+    const { data, error, count } = await query
+      .range(offset, offset + safeLimit - 1);
+
+    if (error) throw error;
+
+    // Apply privacy settings to each profile
+    const { applyPrivacySettings } = require('../utils/validators');
+    const filteredData = (data || []).map(student => {
+      const isOwnProfile = student.user_id === req.userId;
+      return applyPrivacySettings(student, student.privacy_settings, isOwnProfile);
+    });
+
+    return successResponse(res, {
+      students: filteredData,
+      pagination: {
+        page: parseInt(page),
+        limit: safeLimit,
+        total: count,
+        pages: Math.ceil(count / safeLimit)
+      }
+    }, 'Directory retrieved successfully');
+
+  } catch (error) {
+    console.error('Directory fetch error:', error);
+    return errorResponse(res, 'Failed to fetch directory', 500, error);
+  }
+});
+
+// ============================================
 // GET PENDING STUDENTS (Admin)
 // ============================================
 router.get('/pending', authenticate, requireAdmin, async (req, res) => {
@@ -177,6 +287,59 @@ router.put('/:id/verify', authenticate, requireAdmin, idParam('id'), validate, a
 });
 
 // ============================================
+// GET STUDENT PROFILE BY ID (Authenticated Students)
+// ============================================
+router.get('/:id/profile', authenticate, profileViewLimiter, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validate UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+      return errorResponse(res, 'Invalid student ID format', 400);
+    }
+
+    const { data, error } = await supabase
+      .from('students')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return errorResponse(res, 'Student not found', 404);
+      }
+      throw error;
+    }
+
+    // Check visibility permissions
+    const isOwnProfile = data.user_id === req.userId;
+    const isActive = data.status === 'active';
+    const visibility = data.visibility || 'students-only';
+
+    // If profile is private and not own profile, deny access
+    if (visibility === 'private' && !isOwnProfile) {
+      return errorResponse(res, 'Profile not found or is private', 404);
+    }
+
+    // If student is not active and not own profile, deny access
+    if (!isActive && !isOwnProfile) {
+      return errorResponse(res, 'Profile not found', 404);
+    }
+
+    // Apply privacy settings
+    const { applyPrivacySettings } = require('../utils/validators');
+    const filteredProfile = applyPrivacySettings(data, data.privacy_settings, isOwnProfile);
+
+    return successResponse(res, filteredProfile, 'Profile retrieved successfully');
+
+  } catch (error) {
+    console.error('Profile view error:', error);
+    return errorResponse(res, 'Failed to load profile', 500, error);
+  }
+});
+
+// ============================================
 // GET STUDENT PROFILE
 // ============================================
 router.get('/me', authenticate, async (req, res) => {
@@ -204,7 +367,7 @@ router.get('/me', authenticate, async (req, res) => {
 // ============================================
 // UPDATE PROFILE
 // ============================================
-router.put('/me', authenticate, studentValidationChains.updateProfile, validate, async (req, res) => {
+router.put('/me', authenticate, profileUpdateLimiter, studentValidationChains.updateProfile, validate, async (req, res) => {
   try {
     const { 
       first_name, 
@@ -214,18 +377,43 @@ router.put('/me', authenticate, studentValidationChains.updateProfile, validate,
       skills,
       github,
       linkedin,
-      department
+      department,
+      // New networking fields
+      twitter,
+      instagram,
+      snapchat,
+      portfolio_url,
+      interests,
+      year_of_study,
+      graduation_year,
+      visibility,
+      privacy_settings
     } = req.body;
+
+    // Import sanitization utilities
+    const { sanitizeBio, sanitizeArray } = require('../utils/validators');
 
     const updates = {};
     if (first_name) updates.first_name = first_name;
     if (last_name) updates.last_name = last_name;
-    if (phone) updates.phone = phone;
-    if (bio) updates.bio = bio;
-    if (skills) updates.skills = skills;
-    if (github) updates.github = github;
-    if (linkedin) updates.linkedin = linkedin;
+    if (phone !== undefined) updates.phone = phone;
+    if (bio !== undefined) updates.bio = sanitizeBio(bio);
+    if (skills !== undefined) updates.skills = sanitizeArray(skills);
+    if (github !== undefined) updates.github = github;
+    if (linkedin !== undefined) updates.linkedin = linkedin;
     if (department) updates.department = department;
+    
+    // New networking fields
+    if (twitter !== undefined) updates.twitter = twitter;
+    if (instagram !== undefined) updates.instagram = instagram;
+    if (snapchat !== undefined) updates.snapchat = snapchat;
+    if (portfolio_url !== undefined) updates.portfolio_url = portfolio_url;
+    if (interests !== undefined) updates.interests = sanitizeArray(interests);
+    if (year_of_study !== undefined) updates.year_of_study = year_of_study;
+    if (graduation_year !== undefined) updates.graduation_year = graduation_year;
+    if (visibility !== undefined) updates.visibility = visibility;
+    if (privacy_settings !== undefined) updates.privacy_settings = privacy_settings;
+    
     updates.updated_at = new Date().toISOString();
 
     const { data, error } = await supabase

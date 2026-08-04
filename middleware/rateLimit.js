@@ -84,10 +84,64 @@ const apiLimiter = rateLimit({
     legacyHeaders: false
 });
 
+// ============================================
+// DIRECTORY RATE LIMIT (prevent scraping)
+// ============================================
+
+const directoryLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 60, // 60 requests per minute per user
+    message: {
+        error: 'Directory access limit exceeded. Please slow down.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        return req.userId || req.ip;
+    }
+});
+
+// ============================================
+// PROFILE VIEW RATE LIMIT
+// ============================================
+
+const profileViewLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 120, // 120 profile views per minute
+    message: {
+        error: 'Profile view limit exceeded. Please slow down.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        return req.userId || req.ip;
+    }
+});
+
+// ============================================
+// PROFILE UPDATE RATE LIMIT
+// ============================================
+
+const profileUpdateLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 10, // 10 profile updates per minute
+    message: {
+        error: 'Profile update limit exceeded. Please wait before trying again.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        return req.userId || req.ip;
+    }
+});
+
 module.exports = {
     authLimiter,
     registrationLimiter,
     votingLimiter,
     uploadLimiter,
-    apiLimiter
+    apiLimiter,
+    directoryLimiter,
+    profileViewLimiter,
+    profileUpdateLimiter
 };
