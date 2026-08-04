@@ -279,3 +279,155 @@ router.post('/:table/batch-update', validateBodyIsObject, async (req, res) => {
 });
 
 module.exports = router;
+// backend/routes/admin.js - Add this to your existing routes
+
+const { sendBulkEmail, getEmailTemplate } = require('../services/email');
+
+// ============================================
+// CREATE ACADEMIC RESOURCE WITH EMAIL
+// ============================================
+router.post('/academic_resources', requireAdmin, async (req, res) => {
+    try {
+        const { 
+            title, 
+            description, 
+            resourceType, 
+            course, 
+            year, 
+            semester, 
+            file_url, 
+            file_name,
+            file_size,
+            file_type,
+            author,
+            category
+        } = req.body;
+
+        console.log('📝 Creating academic resource:', { title, resourceType });
+
+        // 1. Insert into database
+        const insertData = {
+            title,
+            description: description || '',
+            resource_type: resourceType,
+            course: course || '',
+            year: year ? parseInt(year) : null,
+            semester: semester || '',
+            file_url,
+            file_name: file_name || '',
+            file_size: file_size ? parseInt(file_size) : 0,
+            file_type: file_type || '',
+            author: author || '',
+            category: category || '',
+            uploaded_by: req.user?.userId || null,
+            is_active: true,
+            download_count: 0
+        };
+
+        const { data, error } = await supabase
+            .from('academic_resources')
+            .insert(insertData)
+            .select()
+            .single();
+
+        if (error) {
+            console.error('❌ DB error:', error);
+            return res.status(500).json({ 
+                error: `Insert failed: ${error.message}` 
+            });
+        }
+
+        console.log('✅ Resource created:', data.id);
+
+        // 2. Send email notification (async - don't wait)
+        try {
+            const html = getEmailTemplate('new_resource', data);
+            
+            // Don't await - send in background
+            sendBulkEmail({
+                subject: `📚 New Resource: ${data.title}`,
+                html,
+                text: `New resource available: ${data.title}\nType: ${data.resource_type}\nCourse: ${data.course || 'General'}`
+            }).then(result => {
+                console.log(`✅ Email notification sent to ${result.sent} students`);
+            }).catch(err => {
+                console.error('❌ Email notification failed:', err);
+            });
+        } catch (emailError) {
+            console.error('❌ Email error:', emailError);
+            // Don't fail the request if email fails
+        }
+
+        res.json({
+            success: true,
+            message: 'Resource created successfully',
+            data
+        });
+
+    } catch (error) {
+        console.error('❌ Create resource error:', error);
+        res.status(500).json({ error: 'Failed to create resource: ' + error.message });
+    }
+});
+
+// ============================================
+// CREATE EVENT WITH EMAIL
+// ============================================
+router.post('/events', requireAdmin, async (req, res) => {
+    try {
+        const { title, description, date, time, location, image_url, event_type } = req.body;
+
+        // 1. Insert into database
+        const { data, error } = await supabase
+            .from('events')
+            .insert({
+                title,
+                description: description || '',
+                date,
+                time: time || null,
+                location: location || '',
+                image_url: image_url || '',
+                event_type: event_type || 'general',
+                is_active: true,
+                created_by: req.user?.userId || null
+            })
+            .select()
+            .single();
+
+        if (error) {
+            console.error('❌ DB error:', error);
+            return res.status(500).json({ error: 'Failed to create event' });
+        }
+
+        console.log('✅ Event created:', data.id);
+
+        // 2. Send email notification (async)
+        try {
+            const html = getEmailTemplate('new_event', data);
+            
+            sendBulkEmail({
+                subject: `🎉 New Event: ${data.title}`,
+                html,
+                text: `New event: ${data.title}\nDate: ${data.date}\nLocation: ${data.location || 'TBA'}`
+            }).then(result => {
+                console.log(`✅ Event notification sent to ${result.sent} students`);
+            }).catch(err => {
+                console.error('❌ Event notification failed:', err);
+            });
+        } catch (emailError) {
+            console.error('❌ Email error:', emailError);
+        }
+
+        res.json({
+            success: true,
+            message: 'Event created successfully',
+            data
+        });
+
+    } catch (error) {
+        console.error('❌ Create event error:', error);
+        res.status(500).json({ error: 'Failed to create event' });
+    }
+});
+// backend/routes/admin.js - Add this route
+
