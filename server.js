@@ -50,7 +50,7 @@ app.use(helmet({
 // CORS configuration
 const allowedOrigins = [
   'https://nacos-tau-portal.netlify.app',
-  // 'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
+  'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
   'http://localhost:5000',  // Backend serving frontend
   'http://localhost:5500',
   'http://localhost:8080',
@@ -156,6 +156,10 @@ app.use('/api', uploadRoutes);
 // Admin-only generic table write pass-through (events/past_questions/timetables/etc.)
 // Uses service_role client to bypass anon-key RLS 42501 INSERT violations.
 app.use('/api/admin', adminRoutes);
+
+// Audit logs route (admin only)
+const auditLogRoutes = require('./routes/auditLogs');
+app.use('/api/audit-logs', auditLogRoutes);
 
 // Serve root and fallback to index.html for frontend routes
 app.get('/', (req, res) => {

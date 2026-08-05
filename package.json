@@ -9,7 +9,8 @@
     "seed": "node scripts/seed-admin.js",
     "test": "jest",
     "migrate": "node scripts/migrate.js",
-    "migrate:007": "node scripts/migrate-007.js"
+    "migrate:007": "node scripts/migrate-007.js",
+    "migrate:010":"node scripts/migrate-010-audit-logs.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",

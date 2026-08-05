@@ -1,6 +1,56 @@
 // utils/validators.js
 
 /**
+ * Validate email format (TAU specific)
+ * @param {string} email - Email to validate
+ * @returns {boolean} - True if valid, false otherwise
+ */
+function validateEmail(email) {
+  if (!email) return false;
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@(st\.)?tau\.edu\.ng$/i;
+  return emailRegex.test(email);
+}
+
+/**
+ * Validate password strength
+ * Requires: 8+ chars, uppercase, lowercase, digit, special character
+ * @param {string} password - Password to validate
+ * @returns {boolean} - True if valid, false otherwise
+ */
+function validatePassword(password) {
+  if (!password || password.length < 8) return false;
+  
+  const hasUppercase = /[A-Z]/.test(password);
+  const hasLowercase = /[a-z]/.test(password);
+  const hasDigit = /\d/.test(password);
+  const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};:'",.<>/?\\|`~]/.test(password);
+  
+  return hasUppercase && hasLowercase && hasDigit && hasSpecial;
+}
+
+/**
+ * Validate matric number format
+ * Accepts formats like:
+ * - 23/10MSC014
+ * - TAU/CS/23/014
+ * - TAU/MSC/2023/0014
+ * @param {string} matricNo - Matric number to validate
+ * @returns {boolean} - True if valid, false otherwise
+ */
+function validateMatricNo(matricNo) {
+  if (!matricNo) return false;
+  
+  const patterns = [
+    /^TAU\/[A-Z]{2,4}\/\d{2,4}\/\d{3,4}$/i,     // TAU/CS/23/014 or TAU/MSC/2023/0014
+    /^\d{4}\/[A-Z]{2,4}\/\d{2,4}$/i,             // 2023/CS/014
+    /^\d{2}\/\d{2}[A-Z]{2,4}\d{3,4}$/i           // 23/10MSC014
+  ];
+  
+  const trimmed = matricNo.trim().toUpperCase();
+  return patterns.some(pattern => pattern.test(trimmed));
+}
+
+/**
  * Validation utilities for student networking features
  */
 
@@ -218,7 +268,8 @@ function sanitizeRequestBody(req, res, next) {
   const skipFields = [
     'github', 'linkedin', 'twitter', 'instagram', 'portfolio_url', 'snapchat',
     'password', 'token', 'access_token', 'refresh_token',
-    'proof_url', 'file_url', 'image_url', 'profile_picture_url'
+    'proof_url', 'file_url', 'image_url', 'profile_picture_url',
+    'matricNo'
   ];
   
   if (req.body && typeof req.body === 'object') {
@@ -289,6 +340,9 @@ function sanitizeObject(obj, skipFields = [], parentKey = '') {
 }
 
 module.exports = {
+  validateEmail,
+  validatePassword,
+  validateMatricNo,
   validateUrl,
   validateSocialUrl,
   validateArray,

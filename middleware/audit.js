@@ -87,14 +87,34 @@ const auditMiddleware = (req, res, next) => {
                 (method === 'GET' && statusCode < 400 && !route.includes('/admin'));
 
             if (!shouldSkip) {
-                const autoAction = `auto_${method}_${route.replace(/\//g, '_').replace(/[:?]/g, '') || 'root'}`;
+                // Generate cleaner action name
+                let autoAction = `auto_${method}_${route.replace(/\//g, '_').replace(/[:?]/g, '') || 'root'}`;
+                
+                // Clean up common patterns to make action names more readable
+                autoAction = autoAction
+                    .replace('auto_POST__api_auth_register', 'student_registration')
+                    .replace('auto_POST__api_storage_ensure-buckets', 'storage_bucket_check')
+                    .replace('auto_PUT__api_students_me', 'profile_update')
+                    .replace('auto_GET__api_students_directory', 'view_student_directory')
+                    .replace('auto_GET__api_events_upcoming', 'view_upcoming_events')
+                    .replace('auto_GET__api_events_past', 'view_past_events')
+                    .replace('auto_GET__api_resources', 'view_resources')
+                    .replace('auto_GET__api_timetables', 'view_timetables')
+                    .replace('auto_GET__api_career', 'view_career_paths')
+                    .replace('auto_POST__api_events_id_register', 'event_registration')
+                    .replace('auto_GET__api_payments', 'view_payments')
+                    .replace('auto_POST__api_payments', 'payment_submission')
+                    .replace(/_api_/g, '_')
+                    .replace(/__/g, '_')
+                    .slice(0, 80);
+                
                 const alreadyAudited =
                     (typeof autoAction === 'string') &&
                     [...skipActions].some(a => autoAction.includes(a));
 
                 if (!alreadyAudited) {
                     auditLog({
-                        action: autoAction.slice(0, 80),
+                        action: autoAction,
                         userId: userId,
                         userEmail: userEmail,
                         details: {
