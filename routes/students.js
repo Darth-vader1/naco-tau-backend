@@ -53,8 +53,9 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
     } = req.query;
     const offset = (page - 1) * limit;
 
+    // Use the view that includes calculated current_level
     let query = supabase
-      .from('students')
+      .from('students_with_current_level')
       .select('*', { count: 'exact' });
 
     if (search && String(search).trim() !== '') {
