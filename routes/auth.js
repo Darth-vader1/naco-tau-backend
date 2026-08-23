@@ -10,6 +10,34 @@ const { isAdminEmailAllowed, getAdminEmails, successResponse, errorResponse } = 
 const { authValidationChains, validate } = require('../middleware/validation');
 
 /**
+ * Extract year from matric number for level calculation
+ * Supports formats: 22/10MSC014, TAU/CS/23/014, TAU/MSC/2023/0014
+ */
+const extractYearFromMatric = (matricNo) => {
+  if (!matricNo) return null;
+  
+  // Format: 22/10MSC014 or 23/10MSC014
+  const twoDigitMatch = matricNo.match(/^(\d{2})\//);
+  if (twoDigitMatch) {
+    return 2000 + parseInt(twoDigitMatch[1]);
+  }
+  
+  // Format: TAU/CS/23/014
+  const tauTwoDigitMatch = matricNo.match(/TAU\/[A-Z]+\/(\d{2})\//);
+  if (tauTwoDigitMatch) {
+    return 2000 + parseInt(tauTwoDigitMatch[1]);
+  }
+  
+  // Format: TAU/MSC/2023/0014
+  const tauFourDigitMatch = matricNo.match(/TAU\/[A-Z]+\/(\d{4})\//);
+  if (tauFourDigitMatch) {
+    return parseInt(tauFourDigitMatch[1]);
+  }
+  
+  return null;
+};
+
+/**
  * Permanently (HARD) delete a Supabase Auth user.
  *
  * The default admin.deleteUser(id) in Supabase JS SDK v2 does a SOFT
@@ -247,6 +275,12 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
     // service role). Roll back the Auth user on any failure so we
     // never leave orphaned Supabase users.
     // ============================================================
+    
+    // Extract year_of_study from matric number for dynamic level calculation
+    const yearOfStudy = extractYearFromMatric(matricNo.toUpperCase());
+    const programDuration = 4; // Default undergraduate duration
+    const graduationYear = yearOfStudy ? yearOfStudy + programDuration : null;
+    
     const { error: profileError } = await supabase
       .from('students')
       .insert([{
@@ -260,6 +294,9 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
         course: course || 'Computer Science',
         phone: phone || null,
         status: 'active',
+        year_of_study: yearOfStudy,
+        graduation_year: graduationYear,
+        program_duration: programDuration,
         created_at: new Date().toISOString()
       }]);
 
