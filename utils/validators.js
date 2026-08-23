@@ -268,7 +268,7 @@ function sanitizeRequestBody(req, res, next) {
   const skipFields = [
     'github', 'linkedin', 'twitter', 'instagram', 'portfolio_url', 'snapchat',
     'password', 'token', 'access_token', 'refresh_token',
-    'proof_url', 'file_url', 'image_url', 'profile_picture_url',
+    'proof_url', 'file_url', 'image_url', 'imageUrl', 'profile_picture_url',
     'matricNo'
   ];
   
