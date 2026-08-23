@@ -24,11 +24,15 @@ const errorResponse = (res, message = 'Error occurred', statusCode = 500, detail
     const response = {
         success: false,
         error: message,
+        // Backwards-compatible message field (some clients expect `message`)
+        message,
         timestamp: new Date().toISOString()
     };
     
     if (details && process.env.NODE_ENV !== 'production') {
         response.details = details;
+        // If the details include a stack, include it for easier debugging
+        if (details.stack) response.stack = details.stack;
     }
     
     return res.status(statusCode).json(response);
