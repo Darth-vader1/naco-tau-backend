@@ -135,7 +135,8 @@ const studentValidationChains = {
     body('interests').optional().isArray({ max: 10 }).withMessage('interests must be an array (max 10 items)'),
     body('interests.*').optional().isLength({ min: 1, max: 50 }).withMessage('each interest must be 1-50 characters').trim(),
     body('year_of_study').optional()
-      .isIn([100, 200, 300, 400, 500]).withMessage('year_of_study must be one of: 100, 200, 300, 400, 500'),
+      .isInt({ min: 2020, max: new Date().getFullYear() + 1 })
+      .withMessage(`year_of_study must be a year between 2020 and ${new Date().getFullYear() + 1}`),
     body('graduation_year').optional()
       .isInt({ min: new Date().getFullYear(), max: new Date().getFullYear() + 10 })
       .withMessage(`graduation_year must be between ${new Date().getFullYear()} and ${new Date().getFullYear() + 10}`),
