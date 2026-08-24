@@ -8,6 +8,7 @@ const { auditLog } = require('../middleware/audit');
 const { validateEmail, validatePassword, validateMatricNo } = require('../utils/validators');
 const { isAdminEmailAllowed, getAdminEmails, successResponse, errorResponse } = require('../utils/helpers');
 const { authValidationChains, validate } = require('../middleware/validation');
+const { SESSION_CONFIG } = require('../middleware/sessionManager');
 
 /**
  * Extract year from matric number for level calculation
@@ -521,6 +522,94 @@ router.get('/verify', authenticate, async (req, res) => {
 });
 
 // ============================================
+// REFRESH SESSION TOKEN
+// ============================================
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return errorResponse(res, 'Refresh token is required', 400);
+    }
+
+    // Refresh the session with Supabase
+    const { data, error } = await supabase.auth.refreshSession({
+      refresh_token: refreshToken
+    });
+
+    if (error) {
+      console.error('Token refresh error:', error.message);
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid or expired refresh token. Please login again.',
+        code: 'REFRESH_FAILED',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Update session metadata if using session manager
+    if (req.sessionMetadata) {
+      req.sessionMetadata.incrementRefresh();
+      req.sessionMetadata.updateActivity(req.ip, req.headers['user-agent']);
+    }
+
+    // Log successful refresh
+    await auditLog({
+      action: 'token_refresh',
+      userId: data.user.id,
+      details: { email: data.user.email },
+      ip: req.ip
+    });
+
+    return successResponse(res, {
+      session: data.session,
+      user: {
+        id: data.user.id,
+        email: data.user.email
+      }
+    }, 'Session refreshed successfully');
+
+  } catch (error) {
+    console.error('Refresh route error:', error);
+    return errorResponse(res, 'Failed to refresh session. Please login again.', 500, error);
+  }
+});
+
+// ============================================
+// CHECK SESSION STATUS
+// ============================================
+router.get('/session-status', authenticate, async (req, res) => {
+  try {
+    const sessionInfo = {
+      authenticated: true,
+      userId: req.userId,
+      email: req.user.email,
+      role: req.userRole || 'student'
+    };
+
+    // Add session metadata if available
+    if (req.sessionMetadata) {
+      const metadata = req.sessionMetadata;
+      const now = Date.now();
+      
+      sessionInfo.session = {
+        createdAt: new Date(metadata.createdAt).toISOString(),
+        lastActivityAt: new Date(metadata.lastActivityAt).toISOString(),
+        refreshCount: metadata.refreshCount,
+        needsRefresh: metadata.needsRefresh(),
+        expiresIn: Math.max(0, SESSION_CONFIG.SESSION_TIMEOUT - (now - metadata.lastActivityAt)),
+        maxLifetimeRemaining: Math.max(0, SESSION_CONFIG.MAX_SESSION_LIFETIME - (now - metadata.createdAt))
+      };
+    }
+
+    return successResponse(res, sessionInfo, 'Session status retrieved');
+  } catch (error) {
+    console.error('Session status error:', error);
+    return errorResponse(res, 'Failed to get session status', 500, error);
+  }
+});
+
+// ============================================
 // LOGOUT
 // ============================================
 router.post('/logout', authenticate, async (req, res) => {
@@ -531,6 +620,12 @@ router.post('/logout', authenticate, async (req, res) => {
       details: { email: req.user.email },
       ip: req.ip
     });
+
+    // Invalidate session metadata
+    if (req.sessionMetadata) {
+      const { invalidateSession } = require('../middleware/sessionManager');
+      invalidateSession(req.userId);
+    }
 
     const { error } = await supabase.auth.signOut();
     if (error) throw error;

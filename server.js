@@ -30,6 +30,7 @@ const {
 
 const { auditMiddleware } = require('./middleware/audit');
 const { sanitizeRequestBody } = require('./utils/validators');
+const { trackSession, initializeSessionManager } = require('./middleware/sessionManager');
 
 // ---- Route modules ---------------------------------------------------------
 // Loaded after middleware & helpers because some routes require() them
@@ -139,6 +140,10 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // fields to prevent stored XSS attacks (passwords/proofs/tokens are skipped internally)
 app.use(sanitizeRequestBody);
 logger.info('✅ XSS protection enabled (HTML entity escaping)');
+
+// Session tracking: monitor user sessions and detect expired/stale sessions
+app.use(trackSession);
+logger.info('✅ Session tracking enabled');
 
 // Sentry user context (attach user info to error reports)
 if (sentry.isEnabled) {
@@ -337,6 +342,7 @@ app.listen(PORT, () => {
   logger.info(`   - Structured Logging: ENABLED`);
   logger.info(`   - Rate Limiting: ENABLED`);
   logger.info(`   - XSS Protection: ENABLED`);
+  logger.info(`   - Session Management: ENABLED`);
   logger.info(`   - CORS: ENABLED (${productionOrigins.length} origins)`);
   if (process.env.ADMIN_IP_WHITELIST) {
     logger.info(`   - IP Whitelist: ENABLED (admin routes)`);
@@ -345,6 +351,9 @@ app.listen(PORT, () => {
   logger.info('✅ All security features initialized');
   logger.info('📝 Logs location: console + ./logs/ (production)');
   logger.info('='.repeat(60));
+  
+  // Initialize session manager (starts background cleanup)
+  initializeSessionManager();
 });
 
 module.exports = app; // For testing
