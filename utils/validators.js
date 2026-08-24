@@ -143,7 +143,7 @@ function validateBio(bio, maxLength = 500) {
  */
 function validateYearOfStudy(year) {
   if (!year) return true; // Optional field
-  return Number.isInteger(year) && [100, 200, 300, 400, 500].includes(year);
+  return Number.isInteger(year) && [100, 200, 300, 400].includes(year);
 }
 
 /**
