@@ -172,12 +172,21 @@ const globalLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Validate trust proxy configuration
+  validate: { trustProxy: false } // Disable validation warning, we handle it above
 });
 
 // Trust proxy (Railway / Cloudflare / Nginx) so rate limits key on the real client IP
+// Use 1 hop for Railway (more secure than true)
 if (process.env.TRUST_PROXY) {
   const tp = process.env.TRUST_PROXY;
-  app.set('trust proxy', /^(true|1)$/i.test(tp) ? true : tp);
+  // If set to 'true' or '1', trust only 1 proxy hop (Railway's proxy)
+  // This is more secure than trusting all proxies
+  if (/^(true|1)$/i.test(tp)) {
+    app.set('trust proxy', 1); // Trust only the first proxy
+  } else {
+    app.set('trust proxy', tp); // Use custom value (e.g., loopback, specific IPs)
+  }
 }
 
 app.use('/api/', globalLimiter);
