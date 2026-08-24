@@ -122,8 +122,8 @@ router.get('/directory', authenticate, directoryLimiter, async (req, res) => {
 
     // Build query
     let query = supabase
-      .from('students')
-      .select('id, name, first_name, last_name, email, phone, matric_no, department, course, year_of_study, graduation_year, profile_picture_url, bio, skills, interests, linkedin, github, twitter, instagram, snapchat, portfolio_url, visibility, privacy_settings, created_at', { count: 'exact' });
+      .from('students_with_current_level')
+      .select('id, name, first_name, last_name, email, phone, matric_no, department, course, year_of_study, graduation_year, current_level, is_graduated, profile_picture_url, bio, skills, interests, linkedin, github, twitter, instagram, snapchat, portfolio_url, visibility, privacy_settings, created_at', { count: 'exact' });
 
     // Filter: only active students with visibility != 'private'
     query = query
@@ -146,7 +146,8 @@ router.get('/directory', authenticate, directoryLimiter, async (req, res) => {
 
     // Filter by year of study
     if (year) {
-      query = query.eq('year_of_study', parseInt(year));
+      // 'year' parameter now represents level (100, 200, 300, 400)
+      query = query.eq('current_level', parseInt(year));
     }
 
     // Filter by skills (array contains)
