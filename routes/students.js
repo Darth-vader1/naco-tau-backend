@@ -422,9 +422,15 @@ router.put('/me', authenticate, profileUpdateLimiter, studentValidationChains.up
       .update(updates)
       .eq('user_id', req.userId)
       .select()
-      .single();
+      .maybeSingle(); // Changed from .single() to .maybeSingle() to handle missing records
 
     if (error) throw error;
+
+    // If no student record exists, return helpful error
+    if (!data) {
+      console.error('No student profile found for user_id:', req.userId);
+      return errorResponse(res, 'Student profile not found. Please contact support.', 404);
+    }
 
     return successResponse(res, { student: data }, 'Profile updated successfully');
 
@@ -453,9 +459,15 @@ router.post('/me/profile-picture', authenticate, async (req, res) => {
       })
       .eq('user_id', req.userId)
       .select()
-      .single();
+      .maybeSingle(); // Changed from .single() to .maybeSingle()
 
     if (error) throw error;
+
+    // If no student record exists, return helpful error
+    if (!data) {
+      console.error('No student profile found for user_id:', req.userId);
+      return errorResponse(res, 'Student profile not found. Please contact support.', 404);
+    }
 
     // Log profile picture update
     await auditLog({
