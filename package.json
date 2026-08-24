@@ -10,9 +10,11 @@
     "test": "jest",
     "migrate": "node scripts/migrate.js",
     "migrate:007": "node scripts/migrate-007.js",
-    "migrate:010":"node scripts/migrate-010-audit-logs.js"
+    "migrate:010": "node scripts/migrate-010-audit-logs.js"
   },
   "dependencies": {
+    "@sentry/node": "^7.120.4",
+    "@sentry/profiling-node": "^10.71.0",
     "@supabase/supabase-js": "^2.110.8",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
@@ -26,8 +28,7 @@
     "morgan": "^1.11.0",
     "multer": "^1.4.5-lts.1",
     "resend": "^6.18.1",
-    "winston": "^3.11.0",
-    "@sentry/node": "^7.91.0"
+    "winston": "^3.11.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
