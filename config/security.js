@@ -100,13 +100,16 @@ const helmetConfig = helmet({
 /**
  * CSRF Protection Configuration
  * Protects against Cross-Site Request Forgery
+ * 
+ * NOTE: Using 'lax' for SameSite to support cross-origin requests
+ * between Netlify frontend and Railway backend
  */
 const csrfProtection = csrf({
   cookie: {
     key: '_csrf',
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' for cross-origin in production
     maxAge: 3600 // 1 hour
   }
 });
