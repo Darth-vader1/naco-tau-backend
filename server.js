@@ -48,6 +48,7 @@ const paymentRoutes = require('./routes/payment');
 const storageRoutes = require('./routes/storage');
 const uploadRoutes = require('./routes/upload');
 const adminRoutes = require('./routes/admin');
+const hackathonRoutes = require('./routes/hackathons');
 
 const app = express();
 
@@ -160,16 +161,51 @@ if (process.env.ADMIN_IP_WHITELIST) {
 // GLOBAL RATE LIMITING
 // ============================================
 
+// Extract token helper for rate limiting key generation
+const { extractToken } = require('./middleware/auth');
+const crypto = require('crypto');
+
+// Redis for persistent rate limiting across deployments
+const Redis = require('ioredis');
+// For rate-limit-redis v3+, we usually need .default
+let RedisStore;
+try {
+  const rlr = require('rate-limit-redis');
+  RedisStore = rlr.default || rlr;
+} catch (e) {
+  // If not installed yet, we'll fall back to memory
+}
+
+let redisStore;
+if (process.env.REDIS_URL && RedisStore) {
+  const redisClient = new Redis(process.env.REDIS_URL);
+  redisClient.on('error', (err) => console.error('Redis Client Error', err));
+  
+  redisStore = new RedisStore({
+    sendCommand: (...args) => redisClient.call(...args),
+  });
+  console.log('✅ Redis Rate Limiting Enabled');
+}
+
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: Math.max(1, parseInt(process.env.GLOBAL_RATE_LIMIT || '100', 10)),
+  max: Math.max(1, parseInt(process.env.GLOBAL_RATE_LIMIT || '300', 10)),
   message: {
-    error: 'Too many requests from this IP, please try again later.'
+    error: 'Too many requests, please slow down and try again later.'
   },
   standardHeaders: true,
   legacyHeaders: false,
-  // Validate trust proxy configuration
-  validate: { trustProxy: false } // Disable validation warning, we handle it above
+  store: redisStore, // Uses Redis if configured, otherwise automatically falls back to Memory
+  // Key on authenticated user token hash if present, fallback to client IP.
+  // This prevents campus Wi-Fi (where hundreds of students share 1 IP) from triggering a mass block.
+  keyGenerator: (req) => {
+    const token = extractToken(req);
+    if (token) {
+      return `auth_${crypto.createHash('sha256').update(token).digest('hex').substring(0, 16)}`;
+    }
+    return req.ip;
+  },
+  validate: { trustProxy: false }
 });
 
 // Trust proxy (Railway / Cloudflare / Nginx) so rate limits key on the real client IP
@@ -246,6 +282,7 @@ app.use('/api/resources', resourceRoutes);
 app.use('/api/timetables', timetableRoutes);
 app.use('/api/career', careerRoutes);
 app.use('/api/payments', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], paymentRoutes); // CSRF on payments
+app.use('/api/hackathons', hackathonRoutes);
 // Storage admin routes (service_role backed, admin only)
 app.use('/api/storage', storageRoutes);
 // File upload/delete/list routes (generic bucket-key paths: /upload/:bucket, etc.)
