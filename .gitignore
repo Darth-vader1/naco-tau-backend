@@ -8,8 +8,8 @@ yarn-error.log*
 # Environment Variables (Critical Security)
 .env
 .env.*
-!.env.example
-!.env.security.example
+.env.example
+.env.security.example
 
 # Logs
 logs/

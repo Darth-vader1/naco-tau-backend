@@ -1,0 +1,77 @@
+services:
+  # NACOS Backend API
+  - type: web
+    name: nacos-backend
+    runtime: node
+    region: oregon  # Choose closest to your users: oregon, frankfurt, singapore, ohio
+    plan: free      # Options: free (with cold starts), starter ($7/month, no cold starts)
+    
+    # Build configuration
+    buildCommand: npm install
+    startCommand: npm start
+    
+    # Health check
+    healthCheckPath: /api/health
+    
+    # Auto-deploy from Git
+    autoDeploy: true
+    
+    # Environment variables
+    envVars:
+      # Node environment
+      - key: NODE_ENV
+        value: production
+      
+      # Port (Render uses 10000 by default)
+      - key: PORT
+        value: 10000
+      
+      # Frontend URL (update after deploying to Vercel)
+      - key: FRONTEND_URL
+        sync: false  # Set this in Render dashboard to your Vercel URL
+      
+      # Supabase configuration
+      - key: SUPABASE_URL
+        sync: false  # Set in dashboard: https://pnusmlckowqagnlzjqbv.supabase.co
+      
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false  # Set in dashboard (keep secret!)
+      
+      - key: SUPABASE_ANON_KEY
+        sync: false  # Set in dashboard
+      
+      # JWT Secret
+      - key: JWT_SECRET
+        sync: false  # Set in dashboard (keep secret!)
+      
+      # Email (Resend)
+      - key: RESEND_API_KEY
+        sync: false  # Set in dashboard
+      
+      - key: EMAIL_FROM
+        value: onboarding@resend.dev  # Or your verified domain
+      
+      # Security
+      - key: TRUST_PROXY
+        value: true
+      
+      # Rate limiting
+      - key: GLOBAL_RATE_LIMIT
+        value: 100
+      
+      # Admin allow-list (comma-separated). Without this the code falls back to a
+      # hardcoded default address.
+      - key: ADMIN_EMAILS
+        sync: false  # Set in dashboard
+
+      # Error tracking
+      - key: SENTRY_DSN
+        sync: false  # Set in dashboard
+
+# Notes:
+# 1. Variables with sync: false MUST be set manually in Render dashboard
+# 2. Never commit secrets to Git
+# 3. After deployment, update FRONTEND_URL to your Vercel URL
+# 4. Free tier services sleep after 15 min of inactivity
+# 5. First request after sleep takes 30-60 seconds
+# 6. Upgrade to Starter ($7/month) to eliminate cold starts
