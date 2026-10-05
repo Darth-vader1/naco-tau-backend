@@ -18,7 +18,6 @@
     "@supabase/supabase-js": "^2.110.8",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
-    "csurf": "^1.11.0",
     "dotenv": "^16.6.1",
     "express": "^4.22.2",
     "express-rate-limit": "^7.5.1",

@@ -264,12 +264,12 @@ function applyPrivacySettings(profile, privacySettings, isOwnProfile = false) {
  * @param {Function} next - Express next function
  */
 function sanitizeRequestBody(req, res, next) {
-  // Fields that should not be sanitized (URLs, etc.)
+  // Fields that should be preserved as-is (passwords, tokens, raw URLs, code)
   const skipFields = [
     'github', 'linkedin', 'twitter', 'instagram', 'portfolio_url', 'snapchat',
     'password', 'token', 'access_token', 'refresh_token',
     'proof_url', 'file_url', 'image_url', 'imageUrl', 'profile_picture_url',
-    'matricNo'
+    'payment_proof_url', 'matricNo', 'matric_no'
   ];
   
   if (req.body && typeof req.body === 'object') {
@@ -285,50 +285,41 @@ function sanitizeRequestBody(req, res, next) {
 }
 
 /**
+ * Clean strings by removing potential HTML script tags and dangerous attributes
+ * without corrupting valid punctuation (such as '/', quotes, or math formulas).
+ */
+function cleanString(str) {
+  if (typeof str !== 'string') return str;
+  // Remove executable script tags, iframe, object, and embed tags
+  let cleaned = str.replace(/<\s*(script|iframe|object|embed|applet)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  // Remove standalone dangerous tags
+  cleaned = cleaned.replace(/<\s*(script|iframe|object|embed|applet)[^>]*>/gi, '');
+  // Remove javascript: pseudo-protocols
+  cleaned = cleaned.replace(/javascript\s*:/gi, '');
+  // Remove inline on* event handlers (e.g. onerror=, onclick=)
+  cleaned = cleaned.replace(/\s+on[a-zA-Z]+\s*=\s*(['"]).*?\1/gi, '');
+  cleaned = cleaned.replace(/\s+on[a-zA-Z]+\s*=\s*[^>\s]+/gi, '');
+  return cleaned.trim();
+}
+
+/**
  * Recursively sanitize an object
- * @param {Object} obj - Object to sanitize
- * @param {Array} skipFields - Fields to skip sanitization
- * @param {string} parentKey - Parent key for nested objects
- * @returns {Object} - Sanitized object
  */
 function sanitizeObject(obj, skipFields = [], parentKey = '') {
-  const sanitized = {};
+  const sanitized = Array.isArray(obj) ? [] : {};
   
-  for (const key in obj) {
+  for (const key of Object.keys(obj)) {
     const value = obj[key];
     const fullKey = parentKey ? `${parentKey}.${key}` : key;
     
-    // Skip fields that shouldn't be sanitized
+    // Skip fields that shouldn't be touched
     if (skipFields.includes(key) || skipFields.includes(fullKey)) {
       sanitized[key] = value;
       continue;
     }
     
     if (typeof value === 'string') {
-      // Escape HTML entities
-      sanitized[key] = value
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#x27;')
-        .replace(/\//g, '&#x2F;');
-    } else if (Array.isArray(value)) {
-      sanitized[key] = value.map((item, index) => {
-        if (typeof item === 'string') {
-          return item
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#x27;')
-            .replace(/\//g, '&#x2F;');
-        }
-        if (item && typeof item === 'object') {
-          return sanitizeObject(item, skipFields, `${fullKey}[${index}]`);
-        }
-        return item;
-      });
+      sanitized[key] = cleanString(value);
     } else if (value && typeof value === 'object') {
       sanitized[key] = sanitizeObject(value, skipFields, fullKey);
     } else {

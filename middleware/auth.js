@@ -63,19 +63,6 @@ function extractToken(req) {
     const t = authHeader.slice(7).trim();
     if (t) return t;
   }
-  const cookies = req.cookies || {};
-  const cookie1 = cookies['sb-access-token'];
-  if (typeof cookie1 === 'string' && cookie1.length) return cookie1;
-  const cookie2 = cookies['sb:access-token'];
-  if (typeof cookie2 === 'string' && cookie2.length) return cookie2;
-  // Also check for raw Cookie header via req.headers.cookie fallback
-  if (!cookie1 && !cookie2 && req.headers && typeof req.headers.cookie === 'string') {
-    const raw = req.headers.cookie;
-    const m1 = raw.match(/(?:^|;\s*)sb-access-token=([^;]+)/i);
-    if (m1 && m1[1]) return decodeURIComponent(m1[1]);
-    const m2 = raw.match(/(?:^|;\s*)sb:access-token=([^;]+)/i);
-    if (m2 && m2[1]) return decodeURIComponent(m2[1]);
-  }
   return null;
 }
 

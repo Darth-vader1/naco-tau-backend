@@ -58,8 +58,8 @@ if (sentry.isEnabled) {
   logger.info('✅ Sentry error tracking enabled');
 }
 
-const frontendRoot = path.join(__dirname, '..', 'frontend');
-app.use(express.static(frontendRoot));
+// Frontend is deployed separately, so we don't serve static files here.
+// app.use(express.static(frontendRoot));
 
 // ============================================
 // SECURITY & MIDDLEWARE
@@ -261,19 +261,16 @@ app.use('/api/admin', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], 
 const auditLogRoutes = require('./routes/auditLogs');
 app.use('/api/audit-logs', auditLogRoutes);
 
-// Serve root and fallback to index.html for frontend routes
+// Serve root
 app.get('/', (req, res) => {
-  res.sendFile(path.join(frontendRoot, 'index.html'));
+  res.json({ message: 'NACOS API is running!' });
 });
 
 app.get('*', (req, res) => {
-  if (req.originalUrl.startsWith('/api/')) {
-    return res.status(404).json({
-      error: 'Route not found',
-      path: req.originalUrl
-    });
-  }
-  res.sendFile(path.join(frontendRoot, 'index.html'));
+  res.status(404).json({
+    error: 'Route not found',
+    path: req.originalUrl
+  });
 });
 
 // ============================================

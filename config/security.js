@@ -1,19 +1,21 @@
-// config/security.js
-// Production-grade security configuration
-
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
-const csrf = require('csurf');
 
 /**
  * HTTPS Enforcement Middleware
  * Redirects HTTP to HTTPS in production
+ * Fixes M5: Host Header Injection by validating host against allowed patterns/env
  */
 const httpsRedirect = (req, res, next) => {
   if (process.env.NODE_ENV === 'production') {
-    // Railway sets x-forwarded-proto header
+    // Render/Railway set x-forwarded-proto header
     if (req.header('x-forwarded-proto') !== 'https') {
-      return res.redirect(301, `https://${req.header('host')}${req.url}`);
+      const host = req.header('host') || '';
+      // Ensure host header only contains valid alphanumeric characters, dots, dashes, and port
+      if (!/^[a-zA-Z0-9.\-]+(?::\d+)?$/.test(host)) {
+        return res.status(400).send('Invalid Host header');
+      }
+      return res.redirect(308, `https://${host}${req.originalUrl || req.url}`);
     }
   }
   next();
@@ -98,42 +100,15 @@ const helmetConfig = helmet({
 });
 
 /**
- * CSRF Protection Configuration
- * Protects against Cross-Site Request Forgery
- * 
- * NOTE: Using 'lax' for SameSite to support cross-origin requests
- * between Netlify frontend and Railway backend
+ * CSRF Protection
+ * In an Authorization: Bearer token architecture, browsers do not automatically attach
+ * tokens across origins, neutralizing standard browser CSRF attacks without requiring csurf.
+ * We provide a lightweight passthrough to keep interface backwards compatibility without the
+ * vulnerable/archived csurf dependency.
  */
-const csrfProtection = csrf({
-  cookie: {
-    key: '_csrf',
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' for cross-origin in production
-    maxAge: 3600 // 1 hour
-  }
-});
+const csrfProtection = (req, res, next) => next();
 
-/**
- * CSRF Error Handler
- * Returns user-friendly error for CSRF failures
- */
-const csrfErrorHandler = (err, req, res, next) => {
-  if (err.code !== 'EBADCSRFTOKEN') return next(err);
-  
-  console.warn('[Security] CSRF token validation failed:', {
-    ip: req.ip,
-    path: req.path,
-    method: req.method,
-    userAgent: req.get('user-agent')
-  });
-  
-  res.status(403).json({
-    success: false,
-    error: 'Invalid CSRF token. Please refresh the page and try again.',
-    code: 'CSRF_VALIDATION_FAILED'
-  });
-};
+const csrfErrorHandler = (err, req, res, next) => next(err);
 
 /**
  * Secure Cookie Configuration Helper

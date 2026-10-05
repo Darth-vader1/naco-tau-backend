@@ -70,17 +70,10 @@ class SessionMetadata {
  * Extract Supabase session from request
  */
 const getSessionFromRequest = (req) => {
-  // Try to get from Authorization header
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.substring(7);
+    return authHeader.substring(7).trim();
   }
-
-  // Try to get from cookies (if using cookie-based auth)
-  if (req.cookies && req.cookies['sb-access-token']) {
-    return req.cookies['sb-access-token'];
-  }
-
   return null;
 };
 

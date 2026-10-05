@@ -309,9 +309,20 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
         }
       } catch (autoErr) {
         console.error('Auto event registration sync error:', autoErr);
+        // Rollback payment state back to 'pending' so it is not left in an inconsistent state
+        await supabase
+          .from('payments')
+          .update({
+            status: 'pending',
+            verified_by: null,
+            verified_at: null,
+            notes: `Auto-registration failed: ${autoErr.message || 'database error'}`
+          })
+          .eq('id', id);
+
         return errorResponse(
           res,
-          `Payment ${status}, but automatic event registration could not be synced. Please register the student manually.`,
+          'Failed to complete event registration for this payment. Verification rolled back to pending.',
           502,
           autoErr
         );
