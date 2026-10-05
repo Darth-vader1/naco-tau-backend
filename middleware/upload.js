@@ -29,6 +29,8 @@ const BUCKET_MAP = Object.freeze({
   events: BUCKETS.EVENT_IMAGES,
   event_images: BUCKETS.EVENT_IMAGES,
   'event-images': BUCKETS.EVENT_IMAGES,
+  hackathons: BUCKETS.EVENT_IMAGES,
+  'hackathon-banners': BUCKETS.EVENT_IMAGES,
   past_questions: BUCKETS.PAST_QUESTIONS,
   'past-questions': BUCKETS.PAST_QUESTIONS,
   pastQuestions: BUCKETS.PAST_QUESTIONS,

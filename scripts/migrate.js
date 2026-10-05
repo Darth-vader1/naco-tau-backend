@@ -355,12 +355,22 @@ async function migrate() {
         console.log('\n📊 Creating indexes...');
 
         const indexes = [
+            'CREATE INDEX IF NOT EXISTS idx_students_user_id ON students(user_id);',
             'CREATE INDEX IF NOT EXISTS idx_students_email ON students(email);',
             'CREATE INDEX IF NOT EXISTS idx_students_matric_no ON students(matric_no);',
             'CREATE INDEX IF NOT EXISTS idx_students_status ON students(status);',
+            'CREATE INDEX IF NOT EXISTS idx_admin_users_user_id ON admin_users(user_id);',
             'CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);',
+            'CREATE INDEX IF NOT EXISTS idx_events_is_active ON events(is_active);',
+            'CREATE INDEX IF NOT EXISTS idx_event_reg_event_user ON event_registrations(event_id, user_id);',
+            'CREATE INDEX IF NOT EXISTS idx_event_reg_user_id ON event_registrations(user_id);',
+            'CREATE INDEX IF NOT EXISTS idx_event_reg_payment_id ON event_registrations(linked_payment_id);',
             'CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);',
             'CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);',
+            'CREATE INDEX IF NOT EXISTS idx_payments_event_id ON payments(event_id);',
+            'CREATE INDEX IF NOT EXISTS idx_payments_submitted_at ON payments(submitted_at);',
+            'CREATE INDEX IF NOT EXISTS idx_voting_pos_active ON voting_positions(is_active);',
+            'CREATE INDEX IF NOT EXISTS idx_voting_cand_position ON voting_candidates(position_id);',
             'CREATE INDEX IF NOT EXISTS idx_votes_voter_id ON votes(voter_id);',
             'CREATE INDEX IF NOT EXISTS idx_votes_position_id ON votes(position_id);',
             'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);',

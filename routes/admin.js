@@ -32,7 +32,10 @@ const ALLOWED_ADMIN_TABLES = Object.freeze([
   'timetables',
   'academic_resources',
   'career_paths',
-  'payment_verification'
+  'payment_verification',
+  'hackathons',
+  'hackathon_registrations',
+  'hackathon_submissions'
 ]);
 
 const TABLE_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
