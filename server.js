@@ -216,7 +216,7 @@ app.get('/api/health', (req, res) => {
 if (process.env.ENABLE_CSRF === 'true') {
   app.get('/api/csrf-token', csrfProtection, (req, res) => {
     res.json({ 
-      csrfToken: req.csrfToken(),
+      csrfToken: typeof req.csrfToken === 'function' ? req.csrfToken() : 'bearer-token-bypass',
       expires: new Date(Date.now() + 3600000).toISOString() // 1 hour
     });
   });
