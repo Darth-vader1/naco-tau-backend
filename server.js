@@ -166,10 +166,10 @@ const { extractToken } = require('./middleware/auth');
 const crypto = require('crypto');
 
 // Redis for persistent rate limiting across deployments
-const Redis = require('ioredis');
-// For rate-limit-redis v3+, we usually need .default
+let Redis;
 let RedisStore;
 try {
+  Redis = require('ioredis');
   const rlr = require('rate-limit-redis');
   RedisStore = rlr.default || rlr;
 } catch (e) {
