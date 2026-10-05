@@ -386,7 +386,7 @@ const server = app.listen(PORT, () => {
   logger.info(`   - CSRF Protection: ${process.env.ENABLE_CSRF === 'true' ? 'ENABLED' : 'DISABLED'}`);
   logger.info(`   - Sentry Monitoring: ${sentry.isEnabled ? 'ENABLED' : 'DISABLED'}`);
   logger.info(`   - Structured Logging: ENABLED`);
-  logger.info(`   - Rate Limiting: ENABLED`);
+  logger.info(`   - Rate Limiting: ENABLED (${redisStore ? 'Upstash Redis' : 'Memory'} store)`);
   logger.info(`   - XSS Protection: ENABLED`);
   logger.info(`   - Session Management: ENABLED`);
   logger.info(`   - CORS: ENABLED (${productionOrigins.length} origins)`);
