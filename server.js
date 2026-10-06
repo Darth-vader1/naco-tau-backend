@@ -49,6 +49,7 @@ const storageRoutes = require('./routes/storage');
 const uploadRoutes = require('./routes/upload');
 const adminRoutes = require('./routes/admin');
 const hackathonRoutes = require('./routes/hackathons');
+const pastExecutiveRoutes = require('./routes/pastExecutives');
 
 const app = express();
 
@@ -285,6 +286,7 @@ app.use('/api/timetables', timetableRoutes);
 app.use('/api/career', careerRoutes);
 app.use('/api/payments', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], paymentRoutes); // CSRF on payments
 app.use('/api/hackathons', hackathonRoutes);
+app.use('/api/past-executives', pastExecutiveRoutes);
 const emailRoutes = require('./routes/email');
 app.use('/api/emails', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], emailRoutes); // CSRF on emails
 // Storage admin routes (service_role backed, admin only)
