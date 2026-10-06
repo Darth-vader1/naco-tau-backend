@@ -1,22 +1,33 @@
 // backend/services/email.js
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 const { supabase } = require('../config/supabase');
 
 // ============================================
-// INITIALIZE RESEND
+// INITIALIZE NODEMAILER (SMTP)
 // ============================================
 
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = process.env.SMTP_PORT || 465;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
 const EMAIL_FROM = process.env.EMAIL_FROM || 'nacos@tau.edu.ng';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://nacosportal.vercel.app';
 
-let resend = null;
+let transporter = null;
 
-if (RESEND_API_KEY) {
-    resend = new Resend(RESEND_API_KEY);
-    console.log('✅ Resend email provider initialized');
+if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+    transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_PORT == 465, // true for 465, false for other ports (587)
+        auth: {
+            user: SMTP_USER,
+            pass: SMTP_PASS,
+        },
+    });
+    console.log('✅ SMTP email provider initialized');
 } else {
-    console.log('⚠️ RESEND_API_KEY not set, email sending disabled');
+    console.log('⚠️ SMTP credentials not fully set, email sending disabled');
 }
 
 // ============================================
@@ -25,28 +36,25 @@ if (RESEND_API_KEY) {
 
 async function sendEmail({ to, subject, html, text }) {
     try {
-        if (!resend) {
-            console.log('⚠️ Email not sent - Resend not initialized');
+        if (!transporter) {
+            console.log('⚠️ Email not sent - SMTP not initialized');
             console.log(`📧 Would send to: ${to}`);
             console.log(`📧 Subject: ${subject}`);
-            return { success: false, error: 'Resend not initialized' };
+            return { success: false, error: 'SMTP not initialized' };
         }
 
-        const { data, error } = await resend.emails.send({
+        const mailOptions = {
             from: EMAIL_FROM,
-            to: Array.isArray(to) ? to : [to],
+            to: Array.isArray(to) ? to.join(', ') : to,
             subject: subject,
             html: html,
             text: text || html.replace(/<[^>]*>/g, ''),
-        });
+        };
 
-        if (error) {
-            console.error('❌ Resend error:', error);
-            throw error;
-        }
+        const info = await transporter.sendMail(mailOptions);
 
-        console.log(`✅ Email sent to ${Array.isArray(to) ? to.length : 1} recipient(s)`);
-        return { success: true, data };
+        console.log(`✅ Email sent to ${Array.isArray(to) ? to.length : 1} recipient(s) [ID: ${info.messageId}]`);
+        return { success: true, data: info };
         
     } catch (error) {
         console.error('❌ Email send error:', error);
@@ -111,14 +119,19 @@ async function sendBulkEmail({ subject, html, text }) {
             try {
                 console.log(`📤 Sending batch ${i + 1}/${batches.length} (${batch.length} recipients)`);
                 
-                await sendEmail({
+                const result = await sendEmail({
                     to: batch,
                     subject,
                     html,
                     text
                 });
                 
-                successCount += batch.length;
+                if (result.success) {
+                    successCount += batch.length;
+                } else {
+                    console.error(`❌ Batch ${i + 1} failed:`, result.error);
+                    errorCount += batch.length;
+                }
                 
                 // Wait 1 second between batches (rate limiting)
                 if (i < batches.length - 1) {
@@ -126,7 +139,7 @@ async function sendBulkEmail({ subject, html, text }) {
                 }
                 
             } catch (error) {
-                console.error(`❌ Batch ${i + 1} failed:`, error);
+                console.error(`❌ Batch ${i + 1} threw an error:`, error);
                 errorCount += batch.length;
             }
         }
