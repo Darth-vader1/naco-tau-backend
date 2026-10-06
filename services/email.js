@@ -17,6 +17,8 @@ let transporter = null;
 
 if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
     transporter = nodemailer.createTransport({
+        pool: true,
+        maxConnections: 1,
         host: SMTP_HOST,
         port: SMTP_PORT,
         secure: SMTP_PORT == 465, // true for 465, false for other ports (587)
@@ -133,9 +135,9 @@ async function sendBulkEmail({ subject, html, text }) {
                     errorCount += batch.length;
                 }
                 
-                // Wait 1 second between batches (rate limiting)
+                // Wait 5 seconds between batches (rate limiting for Google SMTP)
                 if (i < batches.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    await new Promise(resolve => setTimeout(resolve, 5000));
                 }
                 
             } catch (error) {
