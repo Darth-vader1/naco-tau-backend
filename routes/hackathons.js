@@ -271,13 +271,61 @@ router.post('/:id/register', authenticate, async (req, res) => {
             return errorResponse(res, `Team size cannot exceed ${hackathon.max_team_size} members`, 400);
         }
 
-        // Insert registration
+        const trimmedName = teamName.trim();
+
+        // 1. Validate unique team name for this hackathon
+        const { data: existingTeam } = await supabase
+            .from('hackathon_registrations')
+            .select('id, leader_id')
+            .eq('hackathon_id', id)
+            .ilike('team_name', trimmedName)
+            .maybeSingle();
+
+        if (existingTeam && existingTeam.leader_id !== req.userId) {
+            return errorResponse(res, `The team name "${trimmedName}" is already taken for this event. Please choose another unique name.`, 409);
+        }
+
+        // 2. Check if user is updating their existing registration
+        const { data: existingUserReg } = await supabase
+            .from('hackathon_registrations')
+            .select('id, status')
+            .eq('hackathon_id', id)
+            .eq('leader_id', req.userId)
+            .maybeSingle();
+
+        if (existingUserReg) {
+            const { data: updatedReg, error: updateError } = await supabase
+                .from('hackathon_registrations')
+                .update({
+                    team_name: trimmedName,
+                    track_selected: trackSelected || null,
+                    is_looking_for_members: !!isLookingForMembers,
+                    team_members: members,
+                    updated_at: new Date()
+                })
+                .eq('id', existingUserReg.id)
+                .select()
+                .single();
+
+            if (updateError) throw updateError;
+
+            await auditLog({
+                action: 'hackathon_registration_updated',
+                userId: req.userId,
+                details: { hackathon_id: id, team_name: trimmedName },
+                ip: req.ip
+            });
+
+            return successResponse(res, { registration: updatedReg }, 'Team registration updated successfully!');
+        }
+
+        // 3. New registration
         const { data: reg, error: regError } = await supabase
             .from('hackathon_registrations')
             .insert([{
                 hackathon_id: id,
                 leader_id: req.userId,
-                team_name: teamName.trim(),
+                team_name: trimmedName,
                 track_selected: trackSelected || null,
                 is_looking_for_members: !!isLookingForMembers,
                 team_members: members,
@@ -296,7 +344,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
         await auditLog({
             action: 'hackathon_registered',
             userId: req.userId,
-            details: { hackathon_id: id, team_name: teamName },
+            details: { hackathon_id: id, team_name: trimmedName },
             ip: req.ip
         });
 
