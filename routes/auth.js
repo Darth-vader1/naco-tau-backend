@@ -203,7 +203,7 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       const { data, error } = await supabase.auth.admin.createUser({
         email: email.toLowerCase(),
         password: password,
-        email_confirm: true
+        email_confirm: false
       });
       if (error) {
         console.error('[register] admin.createUser failed:', error);
