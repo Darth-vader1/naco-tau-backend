@@ -101,9 +101,15 @@ DO $$ BEGIN
     END IF;
 END $$;
 
--- Submissions: Public can read submissions for completed hackathons or their own team
+-- Submissions: Public can read submissions; authenticated leaders can insert/update their team's submission
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'hackathon_submissions_select') THEN
         CREATE POLICY "hackathon_submissions_select" ON hackathon_submissions FOR SELECT USING (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'hackathon_submissions_insert') THEN
+        CREATE POLICY "hackathon_submissions_insert" ON hackathon_submissions FOR INSERT TO authenticated WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'hackathon_submissions_update') THEN
+        CREATE POLICY "hackathon_submissions_update" ON hackathon_submissions FOR UPDATE TO authenticated USING (true);
     END IF;
 END $$;

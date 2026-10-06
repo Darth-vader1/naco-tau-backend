@@ -560,6 +560,37 @@ router.get('/admin/:id/participants', authenticate, requireAdmin, async (req, re
 
         if (regError) throw regError;
 
+        // Enrich with leader student profiles
+        const leaderIds = (registrations || []).map(r => r.leader_id).filter(Boolean);
+        if (leaderIds.length > 0) {
+            let students = null;
+            try {
+                const { data } = await supabase
+                    .from('students_with_current_level')
+                    .select('*')
+                    .in('user_id', leaderIds);
+                if (data && data.length) students = data;
+            } catch (_) {}
+
+            if (!students || students.length === 0) {
+                const { data } = await supabase
+                    .from('students')
+                    .select('*')
+                    .in('user_id', leaderIds);
+                students = data || [];
+            }
+
+            const studentMap = new Map();
+            (students || []).forEach(s => {
+                if (s.user_id) studentMap.set(s.user_id, s);
+                if (s.id) studentMap.set(s.id, s);
+            });
+
+            (registrations || []).forEach(r => {
+                r.leaderProfile = studentMap.get(r.leader_id) || null;
+            });
+        }
+
         return successResponse(res, { registrations }, 'Participants and submissions retrieved');
     } catch (error) {
         console.error('Admin get participants error:', error);

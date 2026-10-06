@@ -47,6 +47,12 @@ const registrationLimiter = rateLimit({
 });
 
 // ============================================
+// Helper to get rate limit key (User ID if authenticated, else IP)
+const getUserOrIpKey = (req) => {
+    return req.userId || (req.user && req.user.id) || req.ip;
+};
+
+// ============================================
 // VOTING RATE LIMIT
 // ============================================
 
@@ -57,9 +63,7 @@ const votingLimiter = rateLimit({
     message: {
         error: 'Voting limit reached. You can only vote 5 times per day.'
     },
-    keyGenerator: (req) => {
-        return req.userId || req.ip;
-    }
+    keyGenerator: getUserOrIpKey
 });
 
 // ============================================
@@ -69,10 +73,11 @@ const votingLimiter = rateLimit({
 const uploadLimiter = rateLimit({
     ...commonConfig,
     windowMs: 60 * 60 * 1000, // 1 hour
-    max: 20, // 20 uploads per hour
+    max: 20, // 20 uploads per hour per user
     message: {
         error: 'Upload limit reached. Please try again later.'
-    }
+    },
+    keyGenerator: getUserOrIpKey
 });
 
 // ============================================
@@ -82,10 +87,11 @@ const uploadLimiter = rateLimit({
 const apiLimiter = rateLimit({
     ...commonConfig,
     windowMs: 60 * 60 * 1000, // 1 hour
-    max: 500, // 500 requests per IP
+    max: 500, // 500 requests per user
     message: {
         error: 'API rate limit exceeded. Please slow down your requests.'
-    }
+    },
+    keyGenerator: getUserOrIpKey
 });
 
 // ============================================
@@ -99,9 +105,7 @@ const directoryLimiter = rateLimit({
     message: {
         error: 'Directory access limit exceeded. Please slow down.'
     },
-    keyGenerator: (req) => {
-        return req.userId || req.ip;
-    }
+    keyGenerator: getUserOrIpKey
 });
 
 // ============================================
@@ -115,9 +119,7 @@ const profileViewLimiter = rateLimit({
     message: {
         error: 'Profile view limit exceeded. Please slow down.'
     },
-    keyGenerator: (req) => {
-        return req.userId || req.ip;
-    }
+    keyGenerator: getUserOrIpKey
 });
 
 // ============================================
@@ -131,9 +133,7 @@ const profileUpdateLimiter = rateLimit({
     message: {
         error: 'Profile update limit exceeded. Please wait before trying again.'
     },
-    keyGenerator: (req) => {
-        return req.userId || req.ip;
-    }
+    keyGenerator: getUserOrIpKey
 });
 
 module.exports = {
