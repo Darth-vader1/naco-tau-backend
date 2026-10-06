@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
+const { triggerAutoContentBroadcast } = require('../services/email');
 
 // ============================================
 // GET UPCOMING EVENTS
@@ -187,6 +188,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    if (data) {
+      triggerAutoContentBroadcast('events', data);
+    }
 
     return successResponse(res, { event: data }, 'Event created successfully', 201);
 

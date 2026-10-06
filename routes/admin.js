@@ -19,6 +19,7 @@ const router = express.Router();
 const { validationResult } = require('express-validator');
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const { triggerAutoContentBroadcast } = require('../services/email');
 
 // ============================================
 // WHITELIST
@@ -160,6 +161,12 @@ router.post('/:table', validateBodyIsObject, async (req, res) => {
         error: `Insert into ${req.adminTable} failed: ${sanitizeDbErr(error)}`
       });
     }
+
+    // Automatically broadcast notification email to all active students
+    if (data) {
+      triggerAutoContentBroadcast(req.adminTable, data);
+    }
+
     return res.json({ success: true, data: data || null, count: data ? 1 : 0 });
   } catch (err) {
     console.error(`[admin/POST ${req.adminTable}] exception:`, err);

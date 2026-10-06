@@ -5,6 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
+const { triggerAutoContentBroadcast } = require('../services/email');
 
 // ============================================
 // GET ALL CAREER PATHS
@@ -126,6 +127,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    if (data) {
+      triggerAutoContentBroadcast('career_paths', data);
+    }
 
     await auditLog({
       action: 'career_path_created',

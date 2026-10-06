@@ -5,6 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
+const { triggerAutoContentBroadcast } = require('../services/email');
 
 // ============================================
 // GET ALL RESOURCES
@@ -140,6 +141,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    if (data) {
+      triggerAutoContentBroadcast('academic_resources', data);
+    }
 
     await auditLog({
       action: 'resource_created',

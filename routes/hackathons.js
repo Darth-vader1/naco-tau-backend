@@ -5,6 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin, optionalAuth } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, slugify } = require('../utils/helpers');
+const { triggerAutoContentBroadcast } = require('../services/email');
 
 // ============================================
 // 1. PUBLIC: GET ALL ACTIVE / UPCOMING HACKATHONS
@@ -514,6 +515,10 @@ router.post('/admin/create', authenticate, requireAdmin, async (req, res) => {
             .single();
 
         if (error) throw error;
+
+        if (hackathon) {
+            triggerAutoContentBroadcast('hackathons', hackathon);
+        }
 
         return successResponse(res, { hackathon }, 'Hackathon created successfully', 201);
     } catch (error) {
