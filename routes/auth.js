@@ -275,7 +275,7 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
         department: department || 'Computer Science',
         course: course || 'Computer Science',
         phone: phone || null,
-        status: 'active',
+        status: 'pending',
         year_of_study: yearOfStudy,
         graduation_year: graduationYear,
         program_duration: programDuration,
@@ -654,6 +654,30 @@ router.post('/forgot-password', authLimiter, authValidationChains.forgotPassword
   } catch (error) {
     console.error('Forgot password error:', error);
     return errorResponse(res, 'Failed to send reset link. Please try again.', 500, error);
+  }
+});
+
+// ============================================
+// ACTIVATE PROFILE AFTER OTP VERIFICATION
+// ============================================
+router.post('/activate-profile', authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { error } = await supabase
+      .from('students')
+      .update({ status: 'active' })
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Failed to activate profile:', error);
+      return errorResponse(res, 'Failed to activate profile', 500);
+    }
+
+    return successResponse(res, null, 'Profile activated successfully');
+  } catch (err) {
+    console.error('Activation error:', err);
+    return errorResponse(res, 'Internal server error', 500);
   }
 });
 

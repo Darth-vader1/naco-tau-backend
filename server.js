@@ -285,6 +285,8 @@ app.use('/api/timetables', timetableRoutes);
 app.use('/api/career', careerRoutes);
 app.use('/api/payments', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], paymentRoutes); // CSRF on payments
 app.use('/api/hackathons', hackathonRoutes);
+const emailRoutes = require('./routes/email');
+app.use('/api/emails', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], emailRoutes); // CSRF on emails
 // Storage admin routes (service_role backed, admin only)
 app.use('/api/storage', storageRoutes);
 // File upload/delete/list routes (generic bucket-key paths: /upload/:bucket, etc.)
