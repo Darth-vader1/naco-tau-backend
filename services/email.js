@@ -8,7 +8,7 @@ const { supabase } = require('../config/supabase');
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const EMAIL_FROM = process.env.EMAIL_FROM || 'nacos@tau.edu.ng';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://nacos-tau-portal.netlify.app';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://nacosportal.vercel.app';
 
 let resend = null;
 

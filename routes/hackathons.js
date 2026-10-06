@@ -16,14 +16,29 @@ router.get('/', optionalAuth, async (req, res) => {
         let query = supabase
             .from('hackathons')
             .select('*')
-            .eq('is_published', true);
+            .neq('is_published', false);
 
-        if (event_type) query = query.eq('event_type', event_type);
+        if (event_type) {
+            const et = event_type.trim().toLowerCase();
+            if (et === 'hackathon') {
+                query = query.or('event_type.ilike.%hackathon%,event_type.is.null');
+            } else {
+                query = query.ilike('event_type', `%${et}%`);
+            }
+        }
+
         if (status) {
-            query = query.eq('status', status);
+            const st = status.trim().toLowerCase();
+            if (st === 'voting' || st === 'judging') {
+                query = query.in('status', ['voting', 'judging']);
+            } else if (st === 'completed' || st === 'past') {
+                query = query.in('status', ['completed', 'past']);
+            } else {
+                query = query.eq('status', st);
+            }
         } else {
-            // Default to non-completed ones first
-            query = query.order('start_date', { ascending: true });
+            // Default to non-concluded competitions (exclude completed and past)
+            query = query.not('status', 'in', '("completed","past")').order('start_date', { ascending: true });
         }
 
         const { data: hackathons, error } = await query;
@@ -88,7 +103,7 @@ router.get('/past', async (req, res) => {
                 )
             `)
             .eq('is_published', true)
-            .eq('status', 'completed')
+            .in('status', ['completed', 'past'])
             .order('end_date', { ascending: false });
 
         if (hError) throw hError;
@@ -260,8 +275,13 @@ router.post('/:id/register', authenticate, async (req, res) => {
             return errorResponse(res, 'Hackathon not found or not published', 404);
         }
 
+        const st = (hackathon.status || 'upcoming').toLowerCase();
+        if (['voting', 'judging', 'completed', 'past'].includes(st)) {
+            return errorResponse(res, `Registration is closed because this competition is ${['voting', 'judging'].includes(st) ? 'in judging/voting' : 'concluded'}`, 400);
+        }
+
         const now = new Date();
-        if (new Date(hackathon.registration_deadline) < now) {
+        if (hackathon.registration_deadline && new Date(hackathon.registration_deadline) < now) {
             return errorResponse(res, 'Registration deadline for this event has passed', 400);
         }
 
@@ -499,6 +519,47 @@ router.post('/admin/create', authenticate, requireAdmin, async (req, res) => {
     } catch (error) {
         console.error('Admin create hackathon error:', error);
         return errorResponse(res, 'Failed to create hackathon', 500, error);
+    }
+});
+
+// ============================================
+// 6B. ADMIN: UPDATE HACKATHON STATUS
+// ============================================
+router.patch('/admin/:id/status', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body || {};
+
+        const validStatuses = ['upcoming', 'ongoing', 'voting', 'judging', 'completed', 'past'];
+        if (!status || !validStatuses.includes(status.trim().toLowerCase())) {
+            return errorResponse(res, `Invalid status. Allowed values: ${validStatuses.join(', ')}`, 400);
+        }
+
+        const normalizedStatus = status.trim().toLowerCase();
+
+        const { data: updated, error } = await supabase
+            .from('hackathons')
+            .update({
+                status: normalizedStatus,
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        await auditLog({
+            action: 'hackathon_status_updated',
+            userId: req.userId,
+            details: { hackathon_id: id, new_status: normalizedStatus },
+            ip: req.ip
+        });
+
+        return successResponse(res, { hackathon: updated }, `Status updated to ${normalizedStatus}`);
+    } catch (error) {
+        console.error('Admin update status error:', error);
+        return errorResponse(res, 'Failed to update competition status', 500, error);
     }
 });
 
