@@ -36,7 +36,9 @@ const ALLOWED_ADMIN_TABLES = Object.freeze([
   'payment_verification',
   'hackathons',
   'hackathon_registrations',
-  'hackathon_submissions'
+  'hackathon_submissions',
+  'past_executives',
+  'executives'
 ]);
 
 const TABLE_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
