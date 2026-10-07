@@ -111,7 +111,7 @@ async function sendEmail({ to, bcc, subject, html, text }) {
             const accessToken = await getGmailAccessToken();
 
             // 3. Send over HTTPS (Bypasses Port 465/587 completely!)
-            const response = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send', {
+            const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
