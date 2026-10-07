@@ -433,7 +433,7 @@ function getEmailTemplate(type, data = {}) {
             const dept = item.department || 'Computing Sciences';
             const level = item.level ? `${item.level} Level` : 'All Levels';
             const semester = item.semester || 'Current Semester';
-            const session = item.academic_session || '2025/2026';
+            const session = item.academic_session || '2026/2027';
             const actionUrl = `${FRONTEND_URL}/timetables.html`;
             const desc = item.description ? `<div class="desc-box">${item.description}</div>` : '';
 
