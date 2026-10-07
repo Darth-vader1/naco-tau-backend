@@ -55,15 +55,24 @@ if (OAUTH_CLIENT_ID && OAUTH_CLIENT_SECRET && OAUTH_REFRESH_TOKEN && SMTP_USER) 
 // SEND SINGLE / BATCH EMAIL
 // ============================================
 
+async function getGmailAccessToken() {
+    const response = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            client_id: OAUTH_CLIENT_ID,
+            client_secret: OAUTH_CLIENT_SECRET,
+            refresh_token: OAUTH_REFRESH_TOKEN,
+            grant_type: 'refresh_token'
+        })
+    });
+    const data = await response.json();
+    if (!data.access_token) throw new Error('Failed to generate Gmail Access Token: ' + JSON.stringify(data));
+    return data.access_token;
+}
+
 async function sendEmail({ to, bcc, subject, html, text }) {
     try {
-        if (!transporter) {
-            console.log('⚠️ Email not sent - SMTP not initialized');
-            console.log(`📧 Would send to: ${to || bcc}`);
-            console.log(`📧 Subject: ${subject}`);
-            return { success: false, error: 'SMTP not initialized' };
-        }
-
         const mailOptions = {
             from: `NACOS TAU <${EMAIL_FROM}>`,
             subject: subject,
@@ -78,8 +87,48 @@ async function sendEmail({ to, bcc, subject, html, text }) {
             mailOptions.to = Array.isArray(to) ? to.join(', ') : to;
         }
 
-        const info = await transporter.sendMail(mailOptions);
+        const isOAuth = OAUTH_CLIENT_ID && OAUTH_CLIENT_SECRET && OAUTH_REFRESH_TOKEN;
+
+        if (!transporter && !isOAuth) {
+            console.log('⚠️ Email not sent - SMTP/OAuth not initialized');
+            return { success: false, error: 'Email Provider not initialized' };
+        }
+
+        let info;
         const recipientCount = bcc ? (Array.isArray(bcc) ? bcc.length : 1) : (Array.isArray(to) ? to.length : 1);
+
+        if (isOAuth) {
+            // 1. Generate Raw MIME string using a dummy Nodemailer compiler
+            const compiler = nodemailer.createTransport({ streamTransport: true });
+            const mailObj = await compiler.sendMail(mailOptions);
+            const chunks = [];
+            for await (const chunk of mailObj.message) {
+                chunks.push(chunk);
+            }
+            const rawMessage = Buffer.concat(chunks).toString('base64url'); // Base64URL required by Google API
+
+            // 2. Fetch fresh Access Token
+            const accessToken = await getGmailAccessToken();
+
+            // 3. Send over HTTPS (Bypasses Port 465/587 completely!)
+            const response = await fetch('https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ raw: rawMessage })
+            });
+            
+            const result = await response.json();
+            if (!response.ok) throw new Error('Gmail API Error: ' + JSON.stringify(result));
+            
+            info = { messageId: result.id };
+        } else {
+            // Standard SMTP Fallback
+            info = await transporter.sendMail(mailOptions);
+        }
+
         console.log(`✅ Email sent to ${recipientCount} recipient(s) [ID: ${info.messageId}]`);
         return { success: true, data: info };
 
