@@ -13,24 +13,42 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const EMAIL_FROM = process.env.EMAIL_FROM || 'nacos@tau.edu.ng';
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'https://nacosportal.vercel.app').replace(/\/$/, '');
 
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET;
+const OAUTH_REFRESH_TOKEN = process.env.OAUTH_REFRESH_TOKEN;
+
 let transporter = null;
 
-if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+if (OAUTH_CLIENT_ID && OAUTH_CLIENT_SECRET && OAUTH_REFRESH_TOKEN && SMTP_USER) {
+    // USE GMAIL API (OAUTH2) - Bypasses Render SMTP blocking
+    transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            type: 'OAuth2',
+            user: SMTP_USER,
+            clientId: OAUTH_CLIENT_ID,
+            clientSecret: OAUTH_CLIENT_SECRET,
+            refreshToken: OAUTH_REFRESH_TOKEN
+        }
+    });
+    console.log('✅ Gmail API (OAuth2) email provider initialized');
+} else if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+    // FALLBACK TO STANDARD SMTP
     transporter = nodemailer.createTransport({
         pool: true,
         maxConnections: 1,
         host: SMTP_HOST,
         port: Number(SMTP_PORT),
-        secure: String(SMTP_PORT) === '465', // true for 465, false for 587
-        family: 4, // Force IPv4 (fixes ENETUNREACH on IPv6 networks like Render)
+        secure: String(SMTP_PORT) === '465',
+        family: 4,
         auth: {
             user: SMTP_USER,
             pass: SMTP_PASS,
         },
     });
-    console.log('✅ SMTP email provider initialized');
+    console.log('✅ Standard SMTP email provider initialized');
 } else {
-    console.log('⚠️ SMTP credentials not fully set, email sending disabled');
+    console.log('⚠️ Email credentials not fully set, email sending disabled');
 }
 
 // ============================================
