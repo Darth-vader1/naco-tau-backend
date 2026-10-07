@@ -151,11 +151,29 @@ router.post('/:table', validateBodyIsObject, async (req, res) => {
     const shapeErr = validatePayloadShape(req.body);
     if (shapeErr) return res.status(400).json({ error: shapeErr });
 
-    const { data, error } = await supabase
+    let insertBody = { ...req.body };
+    let { data, error } = await supabase
       .from(req.adminTable)
-      .insert(req.body)
+      .insert(insertBody)
       .select()
       .maybeSingle();
+
+    // Graceful recovery for missing columns (e.g. PGRST204: Could not find the 'level_or_set' column)
+    if (error && (error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+      const match = String(error.message || '').match(/Could not find the '([^']+)' column/i);
+      if (match && match[1] && Object.prototype.hasOwnProperty.call(insertBody, match[1])) {
+        const missingCol = match[1];
+        console.warn(`[admin/POST ${req.adminTable}] Column '${missingCol}' not found in DB schema. Retrying insert without it...`);
+        delete insertBody[missingCol];
+        const retry = await supabase
+          .from(req.adminTable)
+          .insert(insertBody)
+          .select()
+          .maybeSingle();
+        data = retry.data;
+        error = retry.error;
+      }
+    }
 
     if (error) {
       console.error(`[admin/POST ${req.adminTable}] error:`, error);
@@ -193,12 +211,31 @@ router.put('/:table/:id', validateBodyIsObject, async (req, res) => {
       return res.status(400).json({ error: 'Update body is empty; nothing to patch.' });
     }
 
-    const { data, error } = await supabase
+    let updateBody = { ...req.body };
+    let { data, error } = await supabase
       .from(req.adminTable)
-      .update(req.body)
+      .update(updateBody)
       .eq('id', req.adminId)
       .select()
       .maybeSingle();
+
+    // Graceful recovery for missing columns (e.g. PGRST204)
+    if (error && (error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+      const match = String(error.message || '').match(/Could not find the '([^']+)' column/i);
+      if (match && match[1] && Object.prototype.hasOwnProperty.call(updateBody, match[1])) {
+        const missingCol = match[1];
+        console.warn(`[admin/PUT ${req.adminTable}/${req.adminId}] Column '${missingCol}' not found in DB schema. Retrying update without it...`);
+        delete updateBody[missingCol];
+        const retry = await supabase
+          .from(req.adminTable)
+          .update(updateBody)
+          .eq('id', req.adminId)
+          .select()
+          .maybeSingle();
+        data = retry.data;
+        error = retry.error;
+      }
+    }
 
     if (error) {
       console.error(`[admin/PUT ${req.adminTable}/${req.adminId}] error:`, error);

@@ -83,33 +83,54 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
             twitterUrl,
             bio,
             rankOrder,
-            isFeatured
+            isFeatured,
+            levelOrSet,
+            level_or_set
         } = req.body || {};
 
         if (!fullName || !fullName.trim() || !portfolio || !portfolio.trim() || !academicSession || !academicSession.trim()) {
             return errorResponse(res, 'Full name, portfolio, and academic session are required', 400);
         }
 
-        const { data, error } = await supabase
+        const insertPayload = {
+            full_name: fullName.trim(),
+            portfolio: portfolio.trim(),
+            academic_session: academicSession.trim(),
+            administration_name: administrationName ? administrationName.trim() : null,
+            department: department ? department.trim() : 'Computer Science',
+            photo_url: photoUrl ? photoUrl.trim() : null,
+            linkedin_url: linkedinUrl ? linkedinUrl.trim() : null,
+            github_url: githubUrl ? githubUrl.trim() : null,
+            twitter_url: twitterUrl ? twitterUrl.trim() : null,
+            bio: bio ? bio.trim() : null,
+            rank_order: parseInt(rankOrder, 10) || 10,
+            is_featured: !!isFeatured,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+        };
+
+        const resolvedLevel = levelOrSet || level_or_set;
+        if (resolvedLevel) {
+            insertPayload.level_or_set = String(resolvedLevel).trim();
+        }
+
+        let { data, error } = await supabase
             .from('past_executives')
-            .insert([{
-                full_name: fullName.trim(),
-                portfolio: portfolio.trim(),
-                academic_session: academicSession.trim(),
-                administration_name: administrationName ? administrationName.trim() : null,
-                department: department ? department.trim() : 'Computer Science',
-                photo_url: photoUrl ? photoUrl.trim() : null,
-                linkedin_url: linkedinUrl ? linkedinUrl.trim() : null,
-                github_url: githubUrl ? githubUrl.trim() : null,
-                twitter_url: twitterUrl ? twitterUrl.trim() : null,
-                bio: bio ? bio.trim() : null,
-                rank_order: parseInt(rankOrder, 10) || 10,
-                is_featured: !!isFeatured,
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            }])
+            .insert([insertPayload])
             .select()
             .single();
+
+        // If level_or_set is not in DB schema, strip and retry
+        if (error && (error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+            delete insertPayload.level_or_set;
+            const retry = await supabase
+                .from('past_executives')
+                .insert([insertPayload])
+                .select()
+                .single();
+            data = retry.data;
+            error = retry.error;
+        }
 
         if (error) throw error;
 
@@ -145,7 +166,9 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
             twitterUrl,
             bio,
             rankOrder,
-            isFeatured
+            isFeatured,
+            levelOrSet,
+            level_or_set
         } = req.body || {};
 
         const updateData = { updated_at: new Date().toISOString() };
@@ -161,13 +184,28 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
         if (bio !== undefined) updateData.bio = bio ? bio.trim() : null;
         if (rankOrder !== undefined) updateData.rank_order = parseInt(rankOrder, 10) || 10;
         if (isFeatured !== undefined) updateData.is_featured = !!isFeatured;
+        const resolvedLevel = levelOrSet !== undefined ? levelOrSet : level_or_set;
+        if (resolvedLevel !== undefined) updateData.level_or_set = resolvedLevel ? String(resolvedLevel).trim() : null;
 
-        const { data, error } = await supabase
+        let { data, error } = await supabase
             .from('past_executives')
             .update(updateData)
             .eq('id', id)
             .select()
             .single();
+
+        // If level_or_set is not in DB schema, strip and retry
+        if (error && (error.code === 'PGRST204' || String(error.message || '').includes('schema cache'))) {
+            delete updateData.level_or_set;
+            const retry = await supabase
+                .from('past_executives')
+                .update(updateData)
+                .eq('id', id)
+                .select()
+                .single();
+            data = retry.data;
+            error = retry.error;
+        }
 
         if (error) throw error;
 
