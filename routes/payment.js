@@ -5,6 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
+const { sendEventTicketEmail } = require('../services/email');
 
 // ============================================
 // SUBMIT PAYMENT (Student)
@@ -113,6 +114,245 @@ router.post('/submit', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Payment submission error:', error);
     return errorResponse(res, 'Failed to submit payment', 500, error);
+  }
+});
+
+// ============================================
+// GET PAYSTACK CONFIG (Public Key)
+// ============================================
+router.get('/paystack/config', (req, res) => {
+  return successResponse(res, {
+    publicKey: process.env.PAYSTACK_PUBLIC_KEY || ''
+  }, 'Paystack configuration');
+});
+
+// ============================================
+// VERIFY PAYSTACK PAYMENT (Student instant verification)
+// ============================================
+router.post('/verify-paystack', authenticate, async (req, res) => {
+  try {
+    const { reference, event_id, payment_type = 'event_registration' } = req.body;
+
+    if (!reference) {
+      return errorResponse(res, 'Paystack transaction reference is required', 400);
+    }
+
+    if (payment_type === 'event_registration' && !event_id) {
+      return errorResponse(res, 'event_id is required for event registration payments', 400);
+    }
+
+    // 1. Fetch Event Details if registering for an event
+    let targetEvent = null;
+    if (event_id) {
+      const { data: event, error: eventErr } = await supabase
+        .from('events')
+        .select('*')
+        .eq('id', event_id)
+        .maybeSingle();
+
+      if (eventErr) throw eventErr;
+      if (!event) {
+        return errorResponse(res, 'Target event not found', 404);
+      }
+      targetEvent = event;
+
+      // Check capacity
+      if (typeof targetEvent.max_attendees === 'number' && targetEvent.max_attendees > 0) {
+        const { count, error: cntErr } = await supabase
+          .from('event_registrations')
+          .select('id', { count: 'exact', head: true })
+          .eq('event_id', targetEvent.id);
+
+        if (cntErr) throw cntErr;
+        if ((count ?? 0) >= targetEvent.max_attendees) {
+          return errorResponse(res, `Event is fully booked (${targetEvent.max_attendees} attendees reached).`, 409);
+        }
+      }
+    }
+
+    // 2. Prevent replay attacks: check if reference already exists for another user
+    const { data: existingPayment, error: existingPayErr } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('transaction_id', reference)
+      .maybeSingle();
+
+    if (existingPayErr) throw existingPayErr;
+
+    if (existingPayment && existingPayment.user_id !== req.userId) {
+      return errorResponse(res, 'This payment reference is already associated with another account.', 403);
+    }
+
+    // 3. Verify with Paystack API
+    const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+    let verifiedPaystackData = null;
+
+    if (paystackSecret && !paystackSecret.includes('placeholder')) {
+      const verifyRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${paystackSecret}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const verifyData = await verifyRes.json();
+
+      if (!verifyRes.ok || !verifyData.status || verifyData.data?.status !== 'success') {
+        const reason = verifyData.message || (verifyData.data && verifyData.data.gateway_response) || 'Payment verification failed on Paystack.';
+        return errorResponse(res, `Paystack verification failed: ${reason}`, 400);
+      }
+
+      verifiedPaystackData = verifyData.data;
+
+      // Validate payment amount (in kobo)
+      if (targetEvent && targetEvent.requires_payment && Number(targetEvent.payment_amount) > 0) {
+        const requiredKobo = Math.round(Number(targetEvent.payment_amount) * 100);
+        if (verifiedPaystackData.amount < requiredKobo) {
+          return errorResponse(
+            res,
+            `Amount paid (₦${(verifiedPaystackData.amount / 100).toLocaleString('en-NG')}) is less than required fee (₦${Number(targetEvent.payment_amount).toLocaleString('en-NG')}).`,
+            400
+          );
+        }
+      }
+    } else {
+      // Mock / Dev Fallback when secret key is not yet set
+      console.warn(`[Paystack] PAYSTACK_SECRET_KEY not set or placeholder. Accepting test reference "${reference}" in dev mode.`);
+      const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
+      verifiedPaystackData = {
+        status: 'success',
+        amount: simulatedAmount,
+        currency: 'NGN',
+        channel: 'card (test)',
+        reference: reference,
+        paid_at: new Date().toISOString()
+      };
+    }
+
+    const paidAmount = verifiedPaystackData.amount ? verifiedPaystackData.amount / 100 : (targetEvent ? Number(targetEvent.payment_amount) : 0);
+
+    // 4. Save/update payment record in database
+    let paymentRecord = existingPayment;
+
+    if (!paymentRecord) {
+      const { data: newPayment, error: createPayErr } = await supabase
+        .from('payments')
+        .insert([{
+          user_id: req.userId,
+          amount: paidAmount,
+          payment_type: payment_type,
+          transaction_id: reference,
+          payment_proof_url: `https://paystack.com/receipt/${encodeURIComponent(reference)}`,
+          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Paystack online payment`,
+          event_id: targetEvent ? targetEvent.id : null,
+          status: 'verified',
+          verified_by: req.userId,
+          verified_at: new Date().toISOString(),
+          submitted_at: new Date().toISOString(),
+          notes: `Verified via Paystack (${verifiedPaystackData.channel || 'online checkout'})`
+        }])
+        .select()
+        .single();
+
+      if (createPayErr) throw createPayErr;
+      paymentRecord = newPayment;
+    } else if (paymentRecord.status !== 'verified') {
+      const { data: updatedPayment, error: updatePayErr } = await supabase
+        .from('payments')
+        .update({
+          status: 'verified',
+          verified_by: req.userId,
+          verified_at: new Date().toISOString(),
+          notes: `Verified via Paystack (${verifiedPaystackData.channel || 'online checkout'})`
+        })
+        .eq('id', paymentRecord.id)
+        .select()
+        .single();
+
+      if (updatePayErr) throw updatePayErr;
+      paymentRecord = updatedPayment;
+    }
+
+    // 5. If event registration, register student and generate ticket
+    let registrationRecord = null;
+    let ticketNumber = null;
+
+    if (targetEvent) {
+      ticketNumber = 'NACOS-' + targetEvent.id.substring(0, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+
+      const { data: reg, error: regErr } = await supabase
+        .from('event_registrations')
+        .upsert([{
+          event_id: targetEvent.id,
+          user_id: req.userId,
+          registration_date: new Date().toISOString(),
+          status: 'registered',
+          linked_payment_id: paymentRecord.id
+        }], { onConflict: 'event_id,user_id' })
+        .select()
+        .single();
+
+      if (regErr) {
+        console.error('Event registration upsert error:', regErr);
+        throw regErr;
+      }
+      registrationRecord = reg;
+
+      // 6. Send Ticket Confirmation Email asynchronously
+      (async () => {
+        try {
+          const { data: student } = await supabase
+            .from('students')
+            .select('*')
+            .eq('user_id', req.userId)
+            .maybeSingle();
+
+          if (student && student.email) {
+            await sendEventTicketEmail({
+              student,
+              event: targetEvent,
+              ticketNumber,
+              payment: paymentRecord
+            });
+          }
+        } catch (emailErr) {
+          console.error('Ticket email dispatch error:', emailErr);
+        }
+      })();
+    }
+
+    // 7. Audit log
+    await auditLog({
+      action: 'paystack_payment_verified',
+      userId: req.userId,
+      details: {
+        payment_id: paymentRecord.id,
+        amount: paidAmount,
+        reference: reference,
+        event_id: targetEvent ? targetEvent.id : null,
+        ticket_number: ticketNumber
+      },
+      ip: req.ip
+    });
+
+    return successResponse(res, {
+      payment: paymentRecord,
+      registration: registrationRecord,
+      ticket_number: ticketNumber,
+      event: targetEvent ? {
+        id: targetEvent.id,
+        title: targetEvent.title,
+        date: targetEvent.date,
+        time: targetEvent.time,
+        location: targetEvent.location,
+        payment_amount: targetEvent.payment_amount
+      } : null
+    }, 'Payment successfully verified and registration confirmed!', 200);
+
+  } catch (error) {
+    console.error('Paystack verification error:', error);
+    return errorResponse(res, error.message || 'Failed to verify Paystack payment', 500, error);
   }
 });
 

@@ -822,11 +822,70 @@ function triggerAutoContentBroadcast(contentType, itemData, options = {}) {
 }
 
 // ============================================
+// SEND EVENT TICKET CONFIRMATION EMAIL
+// ============================================
+async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
+    if (!student || !student.email || !event) return;
+    try {
+        const studentName = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'Student';
+        const eventTitle = event.title || 'NACOS Event';
+        const dateStr = event.date ? new Date(event.date).toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'TBA';
+        const timeStr = event.time || 'TBA';
+        const locationStr = event.location || 'TAU Campus';
+        const amountStr = payment?.amount ? formatNaira(payment.amount) : (event.payment_amount ? formatNaira(event.payment_amount) : 'Free');
+        const refStr = payment?.transaction_id || payment?.reference || 'N/A';
+        const ticketUrl = `${FRONTEND_URL}/events.html`;
+
+        const metaRows = [
+            { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #1b8c0c; letter-spacing: 1px;">${ticketNumber}</strong>` },
+            { label: 'Event', value: `<strong>${eventTitle}</strong>` },
+            { label: 'Attendee', value: studentName },
+            ...(student.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
+            { label: 'Date', value: dateStr },
+            { label: 'Time', value: timeStr },
+            { label: 'Location / Venue', value: locationStr },
+            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">${amountStr}</span>` },
+            { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
+        ];
+
+        const ticketNotice = `
+            <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
+                <p style="margin: 0; font-size: 13px; color: #166534;">
+                    🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification.
+                </p>
+            </div>
+        `;
+
+        const html = renderBaseLayout({
+            headerBadge: 'Payment Verified & Confirmed',
+            headerTitle: '🎟️ Event Registration Ticket',
+            headerSubtitle: `Your seat is secured for ${eventTitle}`,
+            contentTitle: `Hi ${studentName}, you're all set!`,
+            metaRows,
+            extraHtml: ticketNotice,
+            buttonText: 'View Events Portal',
+            buttonUrl: ticketUrl,
+            noticeText: 'Please keep this email for your records.'
+        });
+
+        return await sendEmail({
+            to: student.email,
+            subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
+            html,
+            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
+        });
+    } catch (err) {
+        console.error('Failed to send event ticket confirmation email:', err);
+    }
+}
+
+// ============================================
 // EXPORT
 // ============================================
 module.exports = {
     sendEmail,
     sendBulkEmail,
+    sendEventTicketEmail,
     getActiveStudents,
     getEmailTemplate,
     logNotification,
