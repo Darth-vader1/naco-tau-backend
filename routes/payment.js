@@ -5,7 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
-const { sendEventTicketEmail } = require('../services/email');
+const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
 
 // ============================================
 // SUBMIT PAYMENT (Student)
@@ -299,7 +299,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
       }
       registrationRecord = reg;
 
-      // 6. Send Ticket Confirmation Email asynchronously
+      // 6. Send Ticket & Admin Payment Alert Emails asynchronously
       (async () => {
         try {
           const { data: student } = await supabase
@@ -308,6 +308,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
             .eq('user_id', req.userId)
             .maybeSingle();
 
+          // A. Send ticket confirmation to student
           if (student && student.email) {
             await sendEventTicketEmail({
               student,
@@ -316,8 +317,33 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
               payment: paymentRecord
             });
           }
+
+          // B. Send payment notification alert to nacos@tau.edu.ng
+          await sendPaymentAdminNotificationEmail({
+            student: student || { name: 'Student', email: req.userEmail || '' },
+            event: targetEvent,
+            payment: paymentRecord,
+            ticketNumber
+          });
+
+          // C. Also sync to payment_verification table so admin dashboard displays it
+          try {
+            await supabase
+              .from('payment_verification')
+              .insert([{
+                student_id: student?.id || null,
+                event_id: targetEvent.id,
+                amount: paidAmount,
+                payment_reference: reference,
+                status: 'verified',
+                created_at: new Date().toISOString()
+              }]);
+          } catch (pvErr) {
+            console.warn('payment_verification sync notice:', pvErr?.message || pvErr);
+          }
+
         } catch (emailErr) {
-          console.error('Ticket email dispatch error:', emailErr);
+          console.error('Ticket/Admin email dispatch error:', emailErr);
         }
       })();
     }

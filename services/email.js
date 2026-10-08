@@ -880,12 +880,72 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
 }
 
 // ============================================
+// SEND PAYMENT ALERT TO ADMIN (nacos@tau.edu.ng)
+// ============================================
+async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber }) {
+    try {
+        const adminEmail = process.env.ADMIN_EMAIL || 'nacos@tau.edu.ng';
+        const studentName = student?.name || `${student?.first_name || ''} ${student?.last_name || ''}`.trim() || 'Student';
+        const amountStr = payment?.amount ? formatNaira(payment.amount) : (event?.payment_amount ? formatNaira(event.payment_amount) : '₦0');
+        const refStr = payment?.transaction_id || payment?.reference || 'N/A';
+        const eventTitle = event?.title || payment?.description || 'Event / Dues';
+        const dateStr = new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
+        const adminUrl = `${FRONTEND_URL}/admin-dashboard.html`;
+
+        const metaRows = [
+            { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #1b8c0c;">${amountStr}</strong>` },
+            { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
+            { label: 'Student / Payer', value: studentName },
+            ...(student?.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
+            ...(student?.email ? [{ label: 'Student Email', value: student.email }] : []),
+            ...(student?.department ? [{ label: 'Department', value: student.department }] : []),
+            ...(ticketNumber ? [{ label: 'Ticket Issued', value: `<code>${ticketNumber}</code>` }] : []),
+            { label: 'Paystack Ref', value: `<code>${refStr}</code>` },
+            { label: 'Payment Time', value: dateStr },
+            { label: 'Gateway Status', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">Verified (Paystack)</span>` }
+        ];
+
+        const html = renderBaseLayout({
+            headerBadge: 'Payment Notification',
+            headerTitle: '💰 New Payment Received',
+            headerSubtitle: `Online payment received from ${studentName}`,
+            contentTitle: `${amountStr} Received via Paystack`,
+            metaRows,
+            extraHtml: `
+                <div style="background: #f8fafc; border-left: 4px solid #1b8c0c; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #334155;">
+                    This payment was automatically verified by the Paystack payment gateway and recorded in the database.
+                </div>
+            `,
+            buttonText: 'Open Admin Dashboard',
+            buttonUrl: adminUrl,
+            noticeText: 'NACOS TAU Financial & Administrative Notification'
+        });
+
+        // Always notify nacos@tau.edu.ng (and custom ADMIN_EMAIL if distinct)
+        const recipients = ['nacos@tau.edu.ng'];
+        if (adminEmail && adminEmail !== 'nacos@tau.edu.ng') {
+            recipients.push(adminEmail);
+        }
+
+        return await sendEmail({
+            to: recipients,
+            subject: `💰 Payment Received: ${amountStr} from ${studentName} (${eventTitle})`,
+            html,
+            text: `New Payment Received!\nAmount: ${amountStr}\nStudent: ${studentName} (${student?.matric_no || 'N/A'})\nEvent: ${eventTitle}\nRef: ${refStr}\nTicket: ${ticketNumber || 'N/A'}\nTime: ${dateStr}\n\nNACOS TAU Portal`
+        });
+    } catch (err) {
+        console.error('Failed to send admin payment notification email:', err);
+    }
+}
+
+// ============================================
 // EXPORT
 // ============================================
 module.exports = {
     sendEmail,
     sendBulkEmail,
     sendEventTicketEmail,
+    sendPaymentAdminNotificationEmail,
     getActiveStudents,
     getEmailTemplate,
     logNotification,
