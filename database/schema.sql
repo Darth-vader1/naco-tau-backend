@@ -76,7 +76,7 @@ CREATE TABLE academic_resources (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   title TEXT NOT NULL,
   description TEXT,
-  resource_type TEXT NOT NULL CHECK (resource_type IN ('past_question', 'lecture_note', 'tutorial', 'reference_material')),
+  resource_type TEXT NOT NULL,
   course TEXT,
   year INTEGER,
   semester TEXT,

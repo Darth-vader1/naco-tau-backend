@@ -118,7 +118,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       return errorResponse(res, 'Title, resource type, and file URL are required', 400);
     }
 
-    const { data, error } = await supabase
+    let insertResult = await supabase
       .from('academic_resources')
       .insert([{
         title,
@@ -138,7 +138,47 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
         created_at: new Date().toISOString()
       }])
       .select()
-      .single();
+      .maybeSingle();
+
+    let data = insertResult.data;
+    let error = insertResult.error;
+
+    if (error && (error.code === '23514' || String(error.message || '').includes('academic_resources_resource_type_check'))) {
+      const typeMap = {
+        'tutorial': 'tutorial',
+        'documentation': 'reference_material',
+        'course': 'tutorial',
+        'book': 'reference_material',
+        'tool': 'reference_material',
+        'other': 'reference_material'
+      };
+      const rawType = String(resource_type || '').toLowerCase();
+      const fallbackType = typeMap[rawType] || 'reference_material';
+      console.warn(`[resources/POST] Check constraint violation for '${resource_type}'. Retrying with fallback '${fallbackType}'...`);
+      const retry = await supabase
+        .from('academic_resources')
+        .insert([{
+          title,
+          description,
+          resource_type: fallbackType,
+          course,
+          year,
+          semester,
+          file_url,
+          file_name,
+          file_size,
+          file_type,
+          author: author || req.user.email,
+          uploaded_by: req.userId,
+          is_active: true,
+          download_count: 0,
+          created_at: new Date().toISOString()
+        }])
+        .select()
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) throw error;
 

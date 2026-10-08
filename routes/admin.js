@@ -175,6 +175,29 @@ router.post('/:table', validateBodyIsObject, async (req, res) => {
       }
     }
 
+    // Graceful recovery for academic_resources check constraint violation (23514)
+    if (error && (error.code === '23514' || String(error.message || '').includes('academic_resources_resource_type_check'))) {
+      const typeMap = {
+        'tutorial': 'tutorial',
+        'documentation': 'reference_material',
+        'course': 'tutorial',
+        'book': 'reference_material',
+        'tool': 'reference_material',
+        'other': 'reference_material'
+      };
+      const rawType = String(insertBody.resource_type || '').toLowerCase();
+      const fallbackType = typeMap[rawType] || 'reference_material';
+      console.warn(`[admin/POST ${req.adminTable}] Check constraint violation on resource_type '${insertBody.resource_type}'. Retrying with DB-compatible fallback '${fallbackType}'...`);
+      insertBody.resource_type = fallbackType;
+      const retry = await supabase
+        .from(req.adminTable)
+        .insert(insertBody)
+        .select()
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
+    }
+
     if (error) {
       console.error(`[admin/POST ${req.adminTable}] error:`, error);
       return res.status(error.status || 500).json({
@@ -235,6 +258,30 @@ router.put('/:table/:id', validateBodyIsObject, async (req, res) => {
         data = retry.data;
         error = retry.error;
       }
+    }
+
+    // Graceful recovery for academic_resources check constraint violation (23514)
+    if (error && (error.code === '23514' || String(error.message || '').includes('academic_resources_resource_type_check'))) {
+      const typeMap = {
+        'tutorial': 'tutorial',
+        'documentation': 'reference_material',
+        'course': 'tutorial',
+        'book': 'reference_material',
+        'tool': 'reference_material',
+        'other': 'reference_material'
+      };
+      const rawType = String(updateBody.resource_type || '').toLowerCase();
+      const fallbackType = typeMap[rawType] || 'reference_material';
+      console.warn(`[admin/PUT ${req.adminTable}/${req.adminId}] Check constraint violation on resource_type '${updateBody.resource_type}'. Retrying with DB-compatible fallback '${fallbackType}'...`);
+      updateBody.resource_type = fallbackType;
+      const retry = await supabase
+        .from(req.adminTable)
+        .update(updateBody)
+        .eq('id', req.adminId)
+        .select()
+        .maybeSingle();
+      data = retry.data;
+      error = retry.error;
     }
 
     if (error) {

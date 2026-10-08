@@ -528,7 +528,12 @@ function getEmailTemplate(type, data = {}) {
         // 3. Academic Resource
         new_resource: (item) => {
             const title = item.title || 'Academic Resource';
-            const type = item.resource_type || 'Lecture Material';
+            const type = {
+                'reference_material': 'Documentation',
+                'tutorial': 'Tutorial',
+                'lecture_note': 'Course',
+                'past_question': 'Past Question'
+            }[item.resource_type] || item.resource_type || 'Study Material';
             const course = item.course || 'All Courses';
             const actionUrl = `${FRONTEND_URL}/resources.html`;
             const desc = item.description ? `<div class="desc-box">${item.description}</div>` : '';
