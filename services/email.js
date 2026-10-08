@@ -386,6 +386,22 @@ async function logNotification(data) {
 // EMAIL TEMPLATE BUILDER & TEMPLATES
 // ============================================
 
+function formatNaira(amount) {
+    if (amount === null || amount === undefined || amount === '') return '₦0';
+    const num = Number(String(amount).replace(/[^0-9.-]+/g, ''));
+    if (isNaN(num)) return `₦${amount}`;
+    return '₦' + num.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+function formatPrizePool(prize) {
+    if (!prize) return 'Prizes & Recognition';
+    const str = String(prize).trim();
+    if (/^\d+(\.\d+)?$/.test(str)) {
+        return '₦' + Number(str).toLocaleString('en-NG');
+    }
+    return str;
+}
+
 function renderBaseLayout({
     headerBadge,
     headerTitle,
@@ -607,7 +623,7 @@ function getEmailTemplate(type, data = {}) {
                 { label: 'Date', value: dateStr },
                 { label: 'Time', value: timeStr },
                 { label: 'Location / Venue', value: location },
-                ...(item.requires_payment ? [{ label: 'Fee', value: item.payment_amount ? `₦${Number(item.payment_amount).toLocaleString()}` : 'Free' }] : [])
+                ...(item.requires_payment ? [{ label: 'Event Fee', value: item.payment_amount ? formatNaira(item.payment_amount) : 'Free' }] : [])
             ];
 
             return renderBaseLayout({
@@ -628,7 +644,7 @@ function getEmailTemplate(type, data = {}) {
             const title = item.title || 'Tech Challenge';
             const eventType = (item.event_type || 'Hackathon').toUpperCase();
             const mode = item.mode ? `${item.mode.charAt(0).toUpperCase() + item.mode.slice(1)}` : 'Hybrid';
-            const prize = item.prize_pool ? `<span class="badge badge-prize">${item.prize_pool}</span>` : 'Prizes & Recognition';
+            const prize = item.prize_pool ? `<span class="badge badge-prize">${formatPrizePool(item.prize_pool)}</span>` : 'Prizes & Recognition';
             const actionUrl = `${FRONTEND_URL}/hackathons.html`;
             const desc = item.description ? `<div class="desc-box">${item.description}</div>` : '';
             const tagline = item.tagline ? `<p style="margin: 0 0 12px; font-weight: 600; color: #1b8c0c; font-size: 15px;">${item.tagline}</p>` : '';

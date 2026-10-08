@@ -285,7 +285,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
       if (!verifiedPayment) {
         return errorResponse(
           res,
-          `This is a paid event (₦${Number(event.payment_amount).toLocaleString()}). Submit an event_registration payment proof and get it verified first, then return to register.`,
+          `This is a paid event (₦${Number(event.payment_amount).toLocaleString('en-NG')}). Submit an event_registration payment proof and get it verified first, then return to register.`,
           402
         );
       }
@@ -293,7 +293,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
       if (Number(verifiedPayment.amount) < Number(event.payment_amount)) {
         return errorResponse(
           res,
-          `Verified amount (₦${Number(verifiedPayment.amount).toLocaleString()}) is less than the required event fee (₦${Number(event.payment_amount).toLocaleString()}).`,
+          `Verified amount (₦${Number(verifiedPayment.amount).toLocaleString('en-NG')}) is less than the required event fee (₦${Number(event.payment_amount).toLocaleString('en-NG')}).`,
           402
         );
       }
