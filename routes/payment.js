@@ -18,10 +18,10 @@ router.post('/bachs-session', authenticate, async (req, res) => {
 
     if (!bachsSecret || bachsSecret.includes('placeholder')) {
       // Return a mock checkout URL for simulation
-      return successResponse(res, 'Mock session created', {
+      return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
         checkout_id: `chk_mock_${Date.now()}`
-      });
+      }, 'Mock session created');
     }
 
     // Call Bachs API to create a session
@@ -49,16 +49,16 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     if (!bachsRes.ok) {
       console.error('Bachs session error:', data);
       console.warn('Falling back to simulation mode due to Bachs API error.');
-      return successResponse(res, 'Mock session created (API Fallback)', {
+      return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
         checkout_id: `chk_mock_${Date.now()}`
-      });
+      }, 'Mock session created (API Fallback)');
     }
 
-    return successResponse(res, 'Session created successfully', {
+    return successResponse(res, {
       checkout_url: data.checkout_url,
       checkout_id: data.id
-    });
+    }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
     return errorResponse(res, 'Internal server error while creating checkout session', 500);
