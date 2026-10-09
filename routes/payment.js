@@ -281,8 +281,9 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           amount: paidAmount,
           payment_type: payment_type,
           transaction_id: reference,
-          payment_proof_url: `https://paystack.com/receipt/${encodeURIComponent(reference)}`,
-          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Paystack online payment`,
+
+          payment_proof_url: `https://bachs.io/receipt/${encodeURIComponent(reference)}`,
+          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Bachs online payment`,
           event_id: targetEvent ? targetEvent.id : null,
           status: 'verified',
           verified_by: req.userId,
@@ -388,7 +389,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
 
     // 7. Audit log
     await auditLog({
-      action: 'paystack_payment_verified',
+      action: 'bachs_payment_verified',
       userId: req.userId,
       details: {
         payment_id: paymentRecord.id,

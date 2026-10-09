@@ -900,20 +900,20 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             ...(student?.email ? [{ label: 'Student Email', value: student.email }] : []),
             ...(student?.department ? [{ label: 'Department', value: student.department }] : []),
             ...(ticketNumber ? [{ label: 'Ticket Issued', value: `<code>${ticketNumber}</code>` }] : []),
-            { label: 'Paystack Ref', value: `<code>${refStr}</code>` },
+            { label: 'Bachs Ref', value: `<code>${refStr}</code>` },
             { label: 'Payment Time', value: dateStr },
-            { label: 'Gateway Status', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">Verified (Paystack)</span>` }
+            { label: 'Gateway Status', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">Verified (Bachs)</span>` }
         ];
 
         const html = renderBaseLayout({
             headerBadge: 'Payment Notification',
             headerTitle: '💰 New Payment Received',
             headerSubtitle: `Online payment received from ${studentName}`,
-            contentTitle: `${amountStr} Received via Paystack`,
+            contentTitle: `${amountStr} Received via Bachs`,
             metaRows,
             extraHtml: `
                 <div style="background: #f8fafc; border-left: 4px solid #1b8c0c; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #334155;">
-                    This payment was automatically verified by the Paystack payment gateway and recorded in the database.
+                    This payment was automatically verified by the Bachs payment gateway and recorded in the database.
                 </div>
             `,
             buttonText: 'Open Admin Dashboard',
