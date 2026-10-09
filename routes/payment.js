@@ -6,6 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
+const crypto = require('crypto');
 
 // ============================================
 // SUBMIT PAYMENT (Student)
@@ -637,6 +638,158 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Payment stats error:', error);
     return errorResponse(res, 'Failed to fetch payment statistics', 500, error);
+  }
+});
+
+// ============================================
+// PAYSTACK WEBHOOK LISTENER
+// ============================================
+router.post('/webhook', async (req, res) => {
+  const secret = process.env.PAYSTACK_SECRET_KEY;
+  if (!secret) return res.status(200).send('No secret');
+
+  // Validate Paystack signature
+  const signature = req.headers['x-paystack-signature'];
+  if (!signature) return res.status(400).send('No signature');
+  
+  let hash;
+  if (req.rawBody) {
+    hash = crypto.createHmac('sha512', secret).update(req.rawBody).digest('hex');
+  } else {
+    hash = crypto.createHmac('sha512', secret).update(JSON.stringify(req.body)).digest('hex');
+  }
+  
+  if (hash !== signature) {
+    return res.status(400).send('Invalid signature');
+  }
+
+  res.sendStatus(200); // Immediately acknowledge Paystack
+
+  const event = req.body;
+  if (event.event === 'charge.success') {
+    const data = event.data;
+    const reference = data.reference;
+    const amountPaid = data.amount / 100; // Convert kobo to Naira
+    const metadata = data.metadata || {};
+    
+    // Extract metadata injected from frontend
+    let eventId = null;
+    let userId = null;
+    let ticketNumber = null;
+    let targetEvent = null;
+    let student = null;
+
+    if (metadata.custom_fields && Array.isArray(metadata.custom_fields)) {
+      const eField = metadata.custom_fields.find(f => f.variable_name === 'event_id');
+      const uField = metadata.custom_fields.find(f => f.variable_name === 'user_id');
+      if (eField) eventId = eField.value;
+      if (uField) userId = uField.value;
+    }
+
+    try {
+      // 1. Skip if already processed
+      const { data: existingPayment } = await supabase
+        .from('payments')
+        .select('id, status')
+        .eq('transaction_id', reference)
+        .maybeSingle();
+
+      if (existingPayment && existingPayment.status === 'verified') {
+        return; // Already verified by frontend popup
+      }
+
+      // 2. Fetch User Student Data
+      if (userId) {
+        const { data: s } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
+        student = s;
+      } else {
+        // Fallback: match by email if user_id is missing
+        const { data: s } = await supabase.from('students').select('*').eq('email', data.customer.email).maybeSingle();
+        student = s;
+      }
+
+      // 3. Fetch Event
+      if (eventId) {
+        const { data: ev } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle();
+        targetEvent = ev;
+      }
+
+      // 4. Save to payments table
+      let paymentRecord;
+      if (!existingPayment) {
+        const { data: newPay, error: pErr } = await supabase.from('payments').insert([{
+          user_id: userId || student?.user_id || null,
+          amount: amountPaid,
+          payment_type: eventId ? 'event_registration' : 'other',
+          transaction_id: reference,
+          payment_proof_url: `https://dashboard.paystack.com/#/search?q=${encodeURIComponent(reference)}`,
+          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : 'Paystack online payment',
+          event_id: eventId || null,
+          status: 'verified',
+          verified_by: null,
+          verified_at: new Date().toISOString(),
+          submitted_at: new Date().toISOString(),
+          notes: 'Verified via Paystack Webhook'
+        }]).select().single();
+        if (pErr) throw pErr;
+        paymentRecord = newPay;
+      } else {
+        const { data: updPay, error: uErr } = await supabase.from('payments').update({
+          status: 'verified',
+          verified_at: new Date().toISOString(),
+          notes: 'Verified via Paystack Webhook'
+        }).eq('id', existingPayment.id).select().single();
+        if (uErr) throw uErr;
+        paymentRecord = updPay;
+      }
+
+      // 5. Register Student for Event
+      if (targetEvent && (userId || student?.user_id)) {
+        ticketNumber = 'NACOS-' + targetEvent.id.substring(0, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+        
+        await supabase.from('event_registrations').upsert([{
+          event_id: targetEvent.id,
+          user_id: userId || student?.user_id,
+          registration_date: new Date().toISOString(),
+          status: 'registered',
+          linked_payment_id: paymentRecord.id
+        }], { onConflict: 'event_id,user_id' });
+      }
+
+      // 6. Sync to payment_verification for dashboard
+      try {
+        await supabase.from('payment_verification').insert([{
+          student_id: student?.id || null,
+          event_id: targetEvent?.id || null,
+          amount: amountPaid,
+          payment_reference: reference,
+          status: 'verified',
+          created_at: new Date().toISOString()
+        }]);
+      } catch (e) {
+        /* Ignore unique constraint / sync errors */
+      }
+
+      // 7. Send Emails
+      if (student && student.email && targetEvent && ticketNumber) {
+        await sendEventTicketEmail({
+          student,
+          event: targetEvent,
+          ticketNumber,
+          payment: paymentRecord
+        });
+      }
+
+      await sendPaymentAdminNotificationEmail({
+        student: student || { name: 'Student', email: data.customer.email },
+        event: targetEvent,
+        payment: paymentRecord,
+        ticketNumber
+      });
+
+    } catch (err) {
+      console.error('[Webhook Error] Processing Paystack charge.success:', err);
+    }
   }
 });
 

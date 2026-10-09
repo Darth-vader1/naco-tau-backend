@@ -136,8 +136,13 @@ logger.info('✅ Structured logging enabled (Winston)');
 app.use(cookieParser());
 logger.info('✅ Cookie parser enabled');
 
-// JSON parsing
-app.use(express.json({ limit: '10mb' }));
+// JSON parsing with raw body support for webhooks
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Global input sanitization: escapes HTML entities in all body/query/params text
