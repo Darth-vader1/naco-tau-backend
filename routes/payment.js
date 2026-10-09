@@ -423,15 +423,7 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
 
     let query = supabase
       .from('payments')
-      .select(`
-        *,
-        students:user_id (
-          name,
-          email,
-          matric_no,
-          department
-        )
-      `, { count: 'exact' });
+      .select('*', { count: 'exact' });
 
     if (status) query = query.eq('status', status);
     if (payment_type) query = query.eq('payment_type', payment_type);
@@ -442,8 +434,27 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
+    // Manually join students based on user_id
+    const userIds = [...new Set((data || []).map(p => p.user_id).filter(Boolean))];
+    let studentMap = {};
+    if (userIds.length > 0) {
+      const { data: studentsData } = await supabase
+        .from('students')
+        .select('user_id, name, email, matric_no, department')
+        .in('user_id', userIds);
+      studentMap = (studentsData || []).reduce((acc, s) => {
+        acc[s.user_id] = s;
+        return acc;
+      }, {});
+    }
+
+    const mappedData = (data || []).map(p => ({
+      ...p,
+      students: studentMap[p.user_id] || null
+    }));
+
     return successResponse(res, {
-      payments: data,
+      payments: mappedData,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -498,14 +509,7 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
       })
       .eq('id', id)
       .eq('status', 'pending') // optimistic concurrency guard
-      .select(`
-        *,
-        students:user_id (
-          name,
-          email,
-          matric_no
-        )
-      `)
+      .select('*')
       .single();
 
     if (error) {
@@ -514,6 +518,18 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
       }
       throw error;
     }
+    
+    // Manually join student data
+    let student = null;
+    if (data.user_id) {
+      const { data: sData } = await supabase
+        .from('students')
+        .select('name, email, matric_no')
+        .eq('user_id', data.user_id)
+        .maybeSingle();
+      student = sData;
+    }
+    data.students = student;
 
     await auditLog({
       action: `payment_${status}`,
