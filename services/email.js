@@ -921,9 +921,9 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             noticeText: 'NACOS TAU Financial & Administrative Notification'
         });
 
-        // Always notify nacos@tau.edu.ng (and custom ADMIN_EMAIL if distinct)
-        const recipients = ['nacos@tau.edu.ng'];
-        if (adminEmail && adminEmail !== 'nacos@tau.edu.ng') {
+        // Always notify nacos@tau.edu.ng, olufemi-abiodun.gbolahan@st.tau.edu.ng, and custom ADMIN_EMAIL
+        const recipients = ['nacos@tau.edu.ng', 'olufemi-abiodun.gbolahan@st.tau.edu.ng'];
+        if (adminEmail && adminEmail !== 'nacos@tau.edu.ng' && adminEmail !== 'olufemi-abiodun.gbolahan@st.tau.edu.ng') {
             recipients.push(adminEmail);
         }
 
