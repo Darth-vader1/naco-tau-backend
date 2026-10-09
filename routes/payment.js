@@ -293,7 +293,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           verified_by: req.userId,
           verified_at: new Date().toISOString(),
           submitted_at: new Date().toISOString(),
-          notes: `Verified via Paystack (${verifiedPaystackData.channel || 'online checkout'})`
+          notes: `Verified via Bachs (${verifiedPaymentData.channel || 'online checkout'})`
         }])
         .select()
         .single();
@@ -307,7 +307,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           status: 'verified',
           verified_by: req.userId,
           verified_at: new Date().toISOString(),
-          notes: `Verified via Paystack (${verifiedPaystackData.channel || 'online checkout'})`
+          notes: `Verified via Bachs (${verifiedPaymentData.channel || 'online checkout'})`
         })
         .eq('id', paymentRecord.id)
         .select()
