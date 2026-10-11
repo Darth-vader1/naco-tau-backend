@@ -304,9 +304,15 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           }
         });
 
-        const verifyData = await verifyRes.json();
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        const sessionObj = verifyData.data || verifyData;
+        const isPaidOrCompleted = 
+          sessionObj.status === 'completed' || 
+          sessionObj.status === 'success' || 
+          sessionObj.status === 'paid' || 
+          sessionObj.payment_status === 'paid';
 
-        if (!verifyRes.ok || !verifyData.status || (verifyData.status !== 'completed' && verifyData.status !== 'success')) {
+        if (!verifyRes.ok || !isPaidOrCompleted) {
           // If it fails, fallback to simulation ONLY IF sandbox
           if (!isLive) {
             console.warn(`[Bachs] Sandbox verification failed, simulating success for "${reference}"`);
@@ -320,18 +326,21 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
               paid_at: new Date().toISOString()
             };
           } else {
-            const reason = verifyData.message || verifyData.detail || 'Payment verification failed on Bachs.';
+            const reason = verifyData.message || verifyData.detail || `Session status is "${sessionObj.status || 'unknown'}" (expected completed/paid)`;
             return errorResponse(res, `Bachs verification failed: ${reason}`, 400);
           }
         } else {
           // Actual verification succeeded!
+          const rawAmount = sessionObj.pricing?.amount || sessionObj.amount;
+          const numAmount = rawAmount ? (parseFloat(rawAmount) * 100) : (targetEvent ? Number(targetEvent.payment_amount) * 100 : 0);
+
           verifiedPaymentData = {
             status: 'success',
-            amount: verifyData.amount ? (typeof verifyData.amount === 'string' ? parseFloat(verifyData.amount) * 100 : verifyData.amount) : (targetEvent ? Number(targetEvent.payment_amount) * 100 : 0),
-            currency: verifyData.currency || 'NGN',
-            channel: verifyData.mode || 'online checkout',
-            reference: verifyData.id || reference,
-            paid_at: verifyData.completed_at || new Date().toISOString()
+            amount: numAmount,
+            currency: sessionObj.pricing?.currency || sessionObj.currency || 'NGN',
+            channel: sessionObj.mode || 'online checkout',
+            reference: sessionObj.id || sessionObj.checkout_id || reference,
+            paid_at: sessionObj.completed_at || new Date().toISOString()
           };
         }
       } catch (err) {
