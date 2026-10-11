@@ -108,8 +108,12 @@ app.use(cors({
     // Allow requests with no origin (like mobile apps, Postman, or same-origin)
     if (!origin) return callback(null, true);
     
-    // Check if origin is in allowed list
-    if (productionOrigins.includes(origin)) {
+    // Check if origin is in allowed list or any Vercel preview/production deployment
+    if (
+      productionOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app') ||
+      origin === 'https://nacosportal.vercel.app'
+    ) {
       callback(null, true);
     } else {
       logger.security.suspiciousActivity('CORS_BLOCKED', { origin });
@@ -381,67 +385,69 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================
-// START SERVER
+// START SERVER (Standalone only — skipped in Vercel Serverless)
 // ============================================
 
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  logger.info('='.repeat(60));
-  logger.info('🚀 NACOS API Server Started Successfully');
-  logger.info('='.repeat(60));
-  logger.info(`📡 Port: ${PORT}`);
-  logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  logger.info(`🔗 Frontend URL: ${process.env.FRONTEND_URL || 'Not configured'}`);
-  logger.info(`🛡️  Security Features:`);
-  logger.info(`   - HTTPS Enforcement: ${process.env.NODE_ENV === 'production' ? 'ENABLED' : 'DISABLED (dev only)'}`);
-  logger.info(`   - CSRF Protection: ${process.env.ENABLE_CSRF === 'true' ? 'ENABLED' : 'DISABLED'}`);
-  logger.info(`   - Sentry Monitoring: ${sentry.isEnabled ? 'ENABLED' : 'DISABLED'}`);
-  logger.info(`   - Structured Logging: ENABLED`);
-  logger.info(`   - Rate Limiting: ENABLED (${redisStore ? 'Upstash Redis' : 'Memory'} store)`);
-  logger.info(`   - XSS Protection: ENABLED`);
-  logger.info(`   - Session Management: ENABLED`);
-  logger.info(`   - CORS: ENABLED (${productionOrigins.length} origins)`);
-  if (process.env.ADMIN_IP_WHITELIST) {
-    logger.info(`   - IP Whitelist: ENABLED (admin routes)`);
-  }
-  logger.info('='.repeat(60));
-  logger.info('✅ All security features initialized');
-  logger.info('📝 Logs location: console + ./logs/ (production)');
-  logger.info('='.repeat(60));
-  
-  // Initialize session manager (starts background cleanup)
-  initializeSessionManager();
-});
-
-// ============================================
-// GRACEFUL SHUTDOWN & PROCESS-LEVEL ERROR HANDLING
-// ============================================
-let shuttingDown = false;
-const shutdown = (signal, exitCode = 0) => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  logger.info(`${signal} received: closing HTTP server...`);
-  server.close(() => {
-    logger.info('HTTP server closed. Exiting.');
-    process.exit(exitCode);
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 5000;
+  const server = app.listen(PORT, () => {
+    logger.info('='.repeat(60));
+    logger.info('🚀 NACOS API Server Started Successfully');
+    logger.info('='.repeat(60));
+    logger.info(`📡 Port: ${PORT}`);
+    logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    logger.info(`🔗 Frontend URL: ${process.env.FRONTEND_URL || 'Not configured'}`);
+    logger.info(`🛡️  Security Features:`);
+    logger.info(`   - HTTPS Enforcement: ${process.env.NODE_ENV === 'production' ? 'ENABLED' : 'DISABLED (dev only)'}`);
+    logger.info(`   - CSRF Protection: ${process.env.ENABLE_CSRF === 'true' ? 'ENABLED' : 'DISABLED'}`);
+    logger.info(`   - Sentry Monitoring: ${sentry.isEnabled ? 'ENABLED' : 'DISABLED'}`);
+    logger.info(`   - Structured Logging: ENABLED`);
+    logger.info(`   - Rate Limiting: ENABLED (${redisStore ? 'Upstash Redis' : 'Memory'} store)`);
+    logger.info(`   - XSS Protection: ENABLED`);
+    logger.info(`   - Session Management: ENABLED`);
+    logger.info(`   - CORS: ENABLED (${productionOrigins.length} origins)`);
+    if (process.env.ADMIN_IP_WHITELIST) {
+      logger.info(`   - IP Whitelist: ENABLED (admin routes)`);
+    }
+    logger.info('='.repeat(60));
+    logger.info('✅ All security features initialized');
+    logger.info('📝 Logs location: console + ./logs/ (production)');
+    logger.info('='.repeat(60));
+    
+    // Initialize session manager (starts background cleanup)
+    initializeSessionManager();
   });
-  // Force-exit if connections don't drain in time.
-  setTimeout(() => {
-    logger.error('Forced shutdown after timeout');
-    process.exit(exitCode || 1);
-  }, 10000).unref();
-};
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled promise rejection', { reason: reason && reason.stack ? reason.stack : String(reason) });
-  if (sentry.isEnabled) sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
-});
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception', { error: err.message, stack: err.stack });
-  if (sentry.isEnabled) sentry.captureException(err);
-  shutdown('uncaughtException', 1);
-});
+  // ============================================
+  // GRACEFUL SHUTDOWN & PROCESS-LEVEL ERROR HANDLING
+  // ============================================
+  let shuttingDown = false;
+  const shutdown = (signal, exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`${signal} received: closing HTTP server...`);
+    server.close(() => {
+      logger.info('HTTP server closed. Exiting.');
+      process.exit(exitCode);
+    });
+    // Force-exit if connections don't drain in time.
+    setTimeout(() => {
+      logger.error('Forced shutdown after timeout');
+      process.exit(exitCode || 1);
+    }, 10000).unref();
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => {
+    logger.error('Unhandled promise rejection', { reason: reason && reason.stack ? reason.stack : String(reason) });
+    if (sentry.isEnabled) sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error('Uncaught exception', { error: err.message, stack: err.stack });
+    if (sentry.isEnabled) sentry.captureException(err);
+    shutdown('uncaughtException', 1);
+  });
+}
 
 module.exports = app; // For testing

@@ -62,8 +62,8 @@ const transports = [
   })
 ];
 
-// File transports (enabled in production or if LOG_TO_FILE is set)
-if (process.env.NODE_ENV === 'production' || process.env.LOG_TO_FILE === 'true') {
+// File transports (enabled in production or if LOG_TO_FILE is set, skipped on Vercel serverless)
+if (!process.env.VERCEL && (process.env.NODE_ENV === 'production' || process.env.LOG_TO_FILE === 'true')) {
   const logsDir = process.env.LOGS_DIR || path.join(__dirname, '..', 'logs');
   
   // Error log file

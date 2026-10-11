@@ -203,8 +203,16 @@ const invalidateSession = (userId) => {
  * Sets up periodic cleanup
  */
 const initializeSessionManager = () => {
+  // In Vercel serverless functions, avoid long-running interval timers
+  if (process.env.VERCEL) {
+    return;
+  }
+
   // Clean up expired sessions every 15 minutes
-  setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+  const interval = setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+  if (interval && interval.unref) {
+    interval.unref();
+  }
   
   logger.info('✅ Session Manager initialized', {
     sessionTimeout: `${SESSION_CONFIG.SESSION_TIMEOUT / (60 * 60 * 1000)}h`,

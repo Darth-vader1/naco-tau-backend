@@ -35,7 +35,13 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:5000'}/events.html?payment=cancelled`
     };
 
-    const bachsRes = await fetch('https://sandbox-api.bachs.io/v1/checkout/sessions', {
+    // Automatically determine if we should hit the Sandbox or Live Bachs API
+    const isLive = bachsSecret.startsWith('sk_live_');
+    const bachsApiUrl = isLive 
+      ? 'https://api.bachs.io/v1/checkout/sessions' 
+      : 'https://sandbox-api.bachs.io/v1/checkout/sessions';
+
+    const bachsRes = await fetch(bachsApiUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${bachsSecret}`,
@@ -246,18 +252,54 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
     let verifiedPaymentData = null;
 
     if (bachsSecret && !bachsSecret.includes('placeholder')) {
-      // NOTE: We don't have the exact Bachs API URL yet, so we will use simulation in the meantime
-      // For a real integration we would do: await fetch(`https://api.bachs.io/v1/payments/verify/${reference}`)
-      console.warn(`[Bachs] Using sandbox/live key to simulate verification for "${reference}"`);
-      const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
-      verifiedPaymentData = {
-        status: 'success',
-        amount: simulatedAmount,
-        currency: 'NGN',
-        channel: 'card (bachs sandbox)',
-        reference: reference,
-        paid_at: new Date().toISOString()
-      };
+      const isLive = bachsSecret.startsWith('sk_live_');
+      const bachsApiUrl = isLive 
+        ? `https://api.bachs.io/v1/checkout/sessions/${encodeURIComponent(reference)}`
+        : `https://sandbox-api.bachs.io/v1/checkout/sessions/${encodeURIComponent(reference)}`;
+
+      try {
+        const verifyRes = await fetch(bachsApiUrl, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${bachsSecret}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        const verifyData = await verifyRes.json();
+
+        if (!verifyRes.ok || !verifyData.status || (verifyData.status !== 'completed' && verifyData.status !== 'success')) {
+          // If it fails, fallback to simulation ONLY IF sandbox
+          if (!isLive) {
+            console.warn(`[Bachs] Sandbox verification failed, simulating success for "${reference}"`);
+            const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
+            verifiedPaymentData = {
+              status: 'success',
+              amount: simulatedAmount,
+              currency: 'NGN',
+              channel: 'card (bachs sandbox simulated)',
+              reference: reference,
+              paid_at: new Date().toISOString()
+            };
+          } else {
+            const reason = verifyData.message || verifyData.detail || 'Payment verification failed on Bachs.';
+            return errorResponse(res, `Bachs verification failed: ${reason}`, 400);
+          }
+        } else {
+          // Actual verification succeeded!
+          verifiedPaymentData = {
+            status: 'success',
+            amount: verifyData.amount ? (typeof verifyData.amount === 'string' ? parseFloat(verifyData.amount) * 100 : verifyData.amount) : (targetEvent ? Number(targetEvent.payment_amount) * 100 : 0),
+            currency: verifyData.currency || 'NGN',
+            channel: verifyData.mode || 'online checkout',
+            reference: verifyData.id || reference,
+            paid_at: verifyData.completed_at || new Date().toISOString()
+          };
+        }
+      } catch (err) {
+        console.error('Bachs verify fetch error:', err);
+        return errorResponse(res, 'Internal server error during payment verification', 500);
+      }
     } else {
       // Mock / Dev Fallback when secret key is not yet set
       console.warn(`[Bachs] BACHS_SECRET_KEY not set. Accepting test reference "${reference}" in dev mode.`);
