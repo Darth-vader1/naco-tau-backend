@@ -37,38 +37,64 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:5000'}/events.html?payment=cancelled`
     };
 
-    // Automatically determine if we should hit the Sandbox or Live Bachs API
+    // Automatically determine base URL
     const isLive = bachsSecret.startsWith('sk_live_');
-    const bachsApiUrl = isLive 
-      ? 'https://api.bachs.io/v1/checkout/sessions' 
-      : 'https://sandbox-api.bachs.io/v1/checkout/sessions';
-
-    const bachsRes = await fetch(bachsApiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${bachsSecret}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await bachsRes.json();
+    const baseUrl = isLive ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
     
-    if (!bachsRes.ok) {
-      const errDetail = data?.detail || data?.message || data?.error_code || JSON.stringify(data);
+    // Candidate endpoints in order (checkout-sessions with hyphen is the official documented endpoint)
+    const candidateUrls = [
+      `${baseUrl}/v1/checkout-sessions`,
+      `${baseUrl}/v1/checkout-sessions/`,
+      `${baseUrl}/v1/checkout/sessions`,
+      `${baseUrl}/v1/checkouts`,
+      `${baseUrl}/v1/payments`
+    ];
+
+    let bachsRes = null;
+    let data = null;
+    let lastUrl = '';
+
+    for (const testUrl of candidateUrls) {
+      lastUrl = testUrl;
+      try {
+        const res = await fetch(testUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${bachsSecret}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const json = await res.json().catch(() => null);
+        if (res.status !== 404) {
+          bachsRes = res;
+          data = json;
+          break;
+        } else {
+          console.warn(`[Bachs] 404 on ${testUrl}, trying next candidate...`);
+        }
+      } catch (e) {
+        console.error(`[Bachs] Error testing ${testUrl}:`, e);
+      }
+    }
+
+    if (!bachsRes || !bachsRes.ok) {
+      const errDetail = data?.detail || data?.message || data?.error_code || 'Endpoint returned 404';
+      const status = bachsRes ? bachsRes.status : 404;
       console.error('Bachs session error:', data);
       console.warn('Falling back to simulation mode due to Bachs API error.');
       return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
         checkout_id: `chk_mock_${Date.now()}`,
         is_simulation: true,
-        simulation_reason: `Bachs API error (${bachsRes.status}): ${errDetail}`
+        simulation_reason: `Bachs API error (${status} on ${lastUrl}): ${errDetail}`
       }, 'Mock session created (API Fallback)');
     }
 
     return successResponse(res, {
-      checkout_url: data.checkout_url,
-      checkout_id: data.id
+      checkout_url: data.checkout_url || data.url,
+      checkout_id: data.id || data.checkout_id || data.session_id
     }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
@@ -259,8 +285,8 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
     if (bachsSecret && !bachsSecret.includes('placeholder')) {
       const isLive = bachsSecret.startsWith('sk_live_');
       const bachsApiUrl = isLive 
-        ? `https://api.bachs.io/v1/checkout/sessions/${encodeURIComponent(reference)}`
-        : `https://sandbox-api.bachs.io/v1/checkout/sessions/${encodeURIComponent(reference)}`;
+        ? `https://api.bachs.io/v1/checkout-sessions/${encodeURIComponent(reference)}`
+        : `https://sandbox-api.bachs.io/v1/checkout-sessions/${encodeURIComponent(reference)}`;
 
       try {
         const verifyRes = await fetch(bachsApiUrl, {
