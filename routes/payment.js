@@ -17,10 +17,12 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
     if (!bachsSecret || bachsSecret.includes('placeholder')) {
-      // Return a mock checkout URL for simulation
+      console.warn('[Bachs] BACHS_SECRET_KEY not configured in environment variables.');
       return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
-        checkout_id: `chk_mock_${Date.now()}`
+        checkout_id: `chk_mock_${Date.now()}`,
+        is_simulation: true,
+        simulation_reason: 'BACHS_SECRET_KEY is missing or not set in Vercel Project Environment Variables.'
       }, 'Mock session created');
     }
 
@@ -53,11 +55,14 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     const data = await bachsRes.json();
     
     if (!bachsRes.ok) {
+      const errDetail = data?.detail || data?.message || data?.error_code || JSON.stringify(data);
       console.error('Bachs session error:', data);
       console.warn('Falling back to simulation mode due to Bachs API error.');
       return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
-        checkout_id: `chk_mock_${Date.now()}`
+        checkout_id: `chk_mock_${Date.now()}`,
+        is_simulation: true,
+        simulation_reason: `Bachs API error (${bachsRes.status}): ${errDetail}`
       }, 'Mock session created (API Fallback)');
     }
 
