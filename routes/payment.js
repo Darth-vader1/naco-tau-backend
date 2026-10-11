@@ -229,6 +229,72 @@ router.get('/paystack/config', (req, res) => {
 });
 
 // ============================================
+// GET PAYMENT RECEIPT / STATUS BY REFERENCE
+// ============================================
+router.get('/receipt/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+    if (!reference) {
+      return errorResponse(res, 'Reference is required', 400);
+    }
+
+    const { data: payment, error } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('transaction_id', reference)
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!payment) {
+      return errorResponse(res, 'Payment receipt not found', 404);
+    }
+
+    // Fetch student info
+    let student = null;
+    if (payment.user_id) {
+      const { data: s } = await supabase
+        .from('students')
+        .select('name, email, matric_no, department, level')
+        .eq('user_id', payment.user_id)
+        .maybeSingle();
+      student = s;
+    }
+
+    // Fetch event info if event_id is present
+    let event = null;
+    let registration = null;
+    if (payment.event_id) {
+      const { data: ev } = await supabase
+        .from('events')
+        .select('*')
+        .eq('id', payment.event_id)
+        .maybeSingle();
+      event = ev;
+
+      const { data: reg } = await supabase
+        .from('event_registrations')
+        .select('*')
+        .eq('linked_payment_id', payment.id)
+        .maybeSingle();
+      registration = reg;
+    }
+
+    const ticketNumber = registration?.ticket_number || ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') + '-' + payment.id.substring(0, 6).toUpperCase());
+
+    return successResponse(res, {
+      payment,
+      student,
+      event,
+      registration,
+      ticket_number: ticketNumber
+    }, 'Receipt retrieved successfully');
+  } catch (error) {
+    console.error('Receipt lookup error:', error);
+    return errorResponse(res, 'Failed to fetch receipt', 500, error);
+  }
+});
+
+// ============================================
 // VERIFY PAYSTACK PAYMENT (Student instant verification)
 // ============================================
 router.post('/verify-paystack', authenticate, async (req, res) => {
@@ -375,7 +441,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           payment_type: payment_type,
           transaction_id: reference,
 
-          payment_proof_url: `https://bachs.io/receipt/${encodeURIComponent(reference)}`,
+          payment_proof_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/receipt.html?reference=${encodeURIComponent(reference)}`,
           description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Bachs online payment`,
           event_id: targetEvent ? targetEvent.id : null,
           status: 'verified',
