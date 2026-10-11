@@ -26,15 +26,22 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       }, 'Mock session created');
     }
 
-    // Call Bachs API to create a session
+    // Format amount with 2 decimal places as required by Bachs pricing schema
+    const numAmount = Number(amount) || 0;
+    const formattedAmount = numAmount.toFixed(2);
+
+    // Call Bachs API to create a session with documented pricing source
     const payload = {
-      amount: String(amount),
-      currency: 'NGN',
-      customer: {
-        email: req.user?.email || 'student@tau.edu.ng'
+      pricing: {
+        amount: formattedAmount,
+        currency: 'NGN'
       },
-      success_url: `${process.env.FRONTEND_URL || 'http://localhost:5000'}/events.html?payment=success&event_id=${event_id}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:5000'}/events.html?payment=cancelled`
+      customer: {
+        email: req.user?.email || 'student@tau.edu.ng',
+        name: req.user?.name || 'Student'
+      },
+      success_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=success&event_id=${event_id}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`
     };
 
     // Automatically determine base URL
