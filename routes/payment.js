@@ -357,31 +357,51 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
 
     if (bachsSecret && !bachsSecret.includes('placeholder')) {
       const isLive = bachsSecret.startsWith('sk_live_');
-      const bachsApiUrl = isLive 
-        ? `https://api.bachs.io/v1/checkout-sessions/${encodeURIComponent(reference)}`
-        : `https://sandbox-api.bachs.io/v1/checkout-sessions/${encodeURIComponent(reference)}`;
+      const candidateGetUrls = [
+        `${baseUrl}/v1/checkout-sessions/${encodeURIComponent(reference)}`,
+        `${baseUrl}/v1/checkout/sessions/${encodeURIComponent(reference)}`,
+        `${baseUrl}/v1/payments/${encodeURIComponent(reference)}`
+      ];
 
       try {
-        const verifyRes = await fetch(bachsApiUrl, {
-          method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${bachsSecret}`,
-            'Content-Type': 'application/json'
+        let verifyRes = null;
+        let verifyData = null;
+
+        for (const testUrl of candidateGetUrls) {
+          try {
+            const resp = await fetch(testUrl, {
+              method: 'GET',
+              headers: {
+                'Authorization': `Bearer ${bachsSecret}`,
+                'Content-Type': 'application/json'
+              }
+            });
+            const j = await resp.json().catch(() => null);
+            if (resp.status !== 404 && j) {
+              verifyRes = resp;
+              verifyData = j;
+              break;
+            }
+          } catch (fetchErr) {
+            console.warn(`[Bachs] Error testing ${testUrl}:`, fetchErr.message);
           }
-        });
+        }
 
-        const verifyData = await verifyRes.json().catch(() => ({}));
-        const sessionObj = verifyData.data || verifyData;
+        const sessionObj = verifyData?.data || verifyData || {};
+        console.log('[Bachs] Verification lookup response:', JSON.stringify(sessionObj));
+
+        const sessionStatus = String(sessionObj.status || sessionObj.payment_status || sessionObj.state || '').toLowerCase();
         const isPaidOrCompleted = 
-          sessionObj.status === 'completed' || 
-          sessionObj.status === 'success' || 
-          sessionObj.status === 'paid' || 
-          sessionObj.payment_status === 'paid';
+          sessionStatus === 'completed' || 
+          sessionStatus === 'success' || 
+          sessionStatus === 'successful' || 
+          sessionStatus === 'paid' ||
+          sessionObj.paid === true;
 
-        if (!verifyRes.ok || !isPaidOrCompleted) {
-          // If it fails, fallback to simulation ONLY IF sandbox
+        if (!verifyRes || !verifyRes.ok || !isPaidOrCompleted) {
+          // If live verification returned non-completed status or lookup failed
           if (!isLive) {
-            console.warn(`[Bachs] Sandbox verification failed, simulating success for "${reference}"`);
+            console.warn(`[Bachs] Sandbox verification simulated for "${reference}"`);
             const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
             verifiedPaymentData = {
               status: 'success',
@@ -392,8 +412,8 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
               paid_at: new Date().toISOString()
             };
           } else {
-            const reason = verifyData.message || verifyData.detail || `Session status is "${sessionObj.status || 'unknown'}" (expected completed/paid)`;
-            return errorResponse(res, `Bachs verification failed: ${reason}`, 400);
+            const reason = verifyData?.message || verifyData?.detail || `Session status is "${sessionStatus || 'unknown'}" (expected completed/paid)`;
+            return errorResponse(res, `Bachs verification: ${reason}`, 400);
           }
         } else {
           // Actual verification succeeded!
@@ -404,9 +424,9 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
             status: 'success',
             amount: numAmount,
             currency: sessionObj.pricing?.currency || sessionObj.currency || 'NGN',
-            channel: sessionObj.mode || 'online checkout',
-            reference: sessionObj.id || sessionObj.checkout_id || reference,
-            paid_at: sessionObj.completed_at || new Date().toISOString()
+            channel: sessionObj.mode || sessionObj.channel || 'online checkout',
+            reference: sessionObj.id || sessionObj.checkout_id || sessionObj.reference || reference,
+            paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString()
           };
         }
       } catch (err) {
@@ -855,11 +875,64 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 });
 
 // ============================================
-// PAYSTACK WEBHOOK LISTENER
+// PAYMENT WEBHOOK LISTENER (Bachs & Paystack)
 // ============================================
 router.post('/webhook', async (req, res) => {
-  const secret = process.env.PAYSTACK_SECRET_KEY;
-  if (!secret) return res.status(200).send('No secret');
+  const bachsSecret = process.env.BACHS_SECRET_KEY;
+  const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+
+  const event = req.body || {};
+  console.log('[Webhook] Received event:', event.event || event.type || event.status || 'unknown');
+
+  // Handle Bachs Webhook if payload matches Bachs format
+  const isBachsEvent = 
+    event.type?.startsWith('checkout.') || 
+    event.type?.startsWith('payment.') || 
+    event.event?.startsWith('checkout.') ||
+    event.checkout_id ||
+    event.data?.checkout_id;
+
+  if (isBachsEvent) {
+    res.sendStatus(200); // Acknowledge Bachs immediately
+    try {
+      const bData = event.data || event;
+      const ref = bData.id || bData.checkout_id || bData.reference || bData.code;
+      const status = String(bData.status || bData.state || event.type || '').toLowerCase();
+      
+      if (status.includes('completed') || status.includes('success') || status.includes('paid')) {
+        const rawAmt = bData.pricing?.amount || bData.amount || 0;
+        const amt = parseFloat(rawAmt) || 0;
+
+        const { data: existing } = await supabase.from('payments').select('id, status').eq('transaction_id', ref).maybeSingle();
+        if (existing && existing.status === 'verified') return;
+
+        let payId = existing?.id;
+        if (!existing) {
+          const { data: newP } = await supabase.from('payments').insert([{
+            amount: amt,
+            transaction_id: ref,
+            status: 'verified',
+            verified_at: new Date().toISOString(),
+            submitted_at: new Date().toISOString(),
+            notes: 'Verified via Bachs Webhook'
+          }]).select().single();
+          payId = newP?.id;
+        } else {
+          await supabase.from('payments').update({
+            status: 'verified',
+            verified_at: new Date().toISOString(),
+            notes: 'Verified via Bachs Webhook'
+          }).eq('id', existing.id);
+        }
+      }
+    } catch (bErr) {
+      console.error('[Bachs Webhook Error]:', bErr);
+    }
+    return;
+  }
+
+  // Paystack verification
+  if (!paystackSecret) return res.status(200).send('No paystack secret');
 
   // Validate Paystack signature
   const signature = req.headers['x-paystack-signature'];
@@ -867,9 +940,9 @@ router.post('/webhook', async (req, res) => {
   
   let hash;
   if (req.rawBody) {
-    hash = crypto.createHmac('sha512', secret).update(req.rawBody).digest('hex');
+    hash = crypto.createHmac('sha512', paystackSecret).update(req.rawBody).digest('hex');
   } else {
-    hash = crypto.createHmac('sha512', secret).update(JSON.stringify(req.body)).digest('hex');
+    hash = crypto.createHmac('sha512', paystackSecret).update(JSON.stringify(req.body)).digest('hex');
   }
   
   if (hash !== signature) {
