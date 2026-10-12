@@ -7,9 +7,18 @@ const cookieParser = require('cookie-parser');
  * Fixes M5: Host Header Injection by validating host against allowed patterns/env
  */
 const httpsRedirect = (req, res, next) => {
+  // Never redirect CORS preflight OPTIONS requests
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+  // Vercel handles HTTPS termination at the edge
+  if (process.env.VERCEL) {
+    return next();
+  }
   if (process.env.NODE_ENV === 'production') {
     // Render/Railway set x-forwarded-proto header
-    if (req.header('x-forwarded-proto') !== 'https') {
+    const proto = req.header('x-forwarded-proto');
+    if (proto && !proto.includes('https')) {
       const host = req.header('host') || '';
       // Ensure host header only contains valid alphanumeric characters, dots, dashes, and port
       if (!/^[a-zA-Z0-9.\-]+(?::\d+)?$/.test(host)) {

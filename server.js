@@ -67,19 +67,9 @@ if (sentry.isEnabled) {
 // SECURITY & MIDDLEWARE
 // ============================================
 
-// HTTPS redirect (production only)
-app.use(httpsRedirect);
-logger.info('✅ HTTPS enforcement enabled (production only)');
-
-// Enhanced Helmet for security headers (CSP, HSTS, etc.)
-app.use(helmetConfig);
-logger.info('✅ Security headers configured (Helmet + CSP + HSTS)');
-
-// Additional custom security headers
-app.use(additionalSecurityHeaders);
-
-// CORS configuration
+// CORS configuration (MUST be first before redirects & security headers so preflights succeed)
 const allowedOrigins = [
+  'https://nacosportal.vercel.app',
   'https://nacos-tau-portal.netlify.app',
   'https://nacos-tau-chapter.netlify.app', // Legacy URL (if still in use)
   'http://localhost:5000',  // Backend serving frontend
@@ -103,7 +93,7 @@ const productionOrigins = (process.env.NODE_ENV === 'production' && process.env.
   ? allowedOrigins.filter(origin => !origin.includes('localhost') && !origin.includes('127.0.0.1'))
   : allowedOrigins;
 
-app.use(cors({
+const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, Postman, or same-origin)
     if (!origin) return callback(null, true);
@@ -122,13 +112,24 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
   optionsSuccessStatus: 200
-}));
+};
 
-// Preflight (OPTIONS) is handled by the cors() middleware above using the allow-list.
-// (Do NOT add app.options('*', cors()) — it would answer preflights with a wildcard origin.)
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// HTTPS redirect (production only)
+app.use(httpsRedirect);
+logger.info('✅ HTTPS enforcement enabled (production only)');
+
+// Enhanced Helmet for security headers (CSP, HSTS, etc.)
+app.use(helmetConfig);
+logger.info('✅ Security headers configured (Helmet + CSP + HSTS)');
+
+// Additional custom security headers
+app.use(additionalSecurityHeaders);
 
 // Logging with Winston (replaces Morgan)
 app.use(morganLogger);
