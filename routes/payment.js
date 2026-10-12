@@ -344,6 +344,7 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
 
     if (bachsSecret && !bachsSecret.includes('placeholder')) {
       const isLive = bachsSecret.startsWith('sk_live_');
+      const baseUrl = isLive ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
       const candidateGetUrls = [
         `${baseUrl}/v1/checkout-sessions/${encodeURIComponent(reference)}`,
         `${baseUrl}/v1/checkout/sessions/${encodeURIComponent(reference)}`,
