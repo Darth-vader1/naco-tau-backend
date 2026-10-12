@@ -47,55 +47,42 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     // Automatically determine base URL
     const isLive = bachsSecret.startsWith('sk_live_');
     const baseUrl = isLive ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
-    
-    // Candidate endpoints in order (checkout-sessions with hyphen is the official documented endpoint)
-    const candidateUrls = [
-      `${baseUrl}/v1/checkout-sessions`,
-      `${baseUrl}/v1/checkout-sessions/`,
-      `${baseUrl}/v1/checkout/sessions`,
-      `${baseUrl}/v1/checkouts`,
-      `${baseUrl}/v1/payments`
-    ];
+    const targetUrl = `${baseUrl}/v1/checkout-sessions`;
 
     let bachsRes = null;
     let data = null;
-    let lastUrl = '';
 
-    for (const testUrl of candidateUrls) {
-      lastUrl = testUrl;
-      try {
-        const res = await fetch(testUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${bachsSecret}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
-        });
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7500);
 
-        const json = await res.json().catch(() => null);
-        if (res.status !== 404) {
-          bachsRes = res;
-          data = json;
-          break;
-        } else {
-          console.warn(`[Bachs] 404 on ${testUrl}, trying next candidate...`);
-        }
-      } catch (e) {
-        console.error(`[Bachs] Error testing ${testUrl}:`, e);
-      }
+      const res = await fetch(targetUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${bachsSecret}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+      bachsRes = res;
+      data = await res.json().catch(() => null);
+    } catch (fetchErr) {
+      console.error('[Bachs] Fetch error connecting to Bachs gateway:', fetchErr.message);
     }
 
     if (!bachsRes || !bachsRes.ok) {
-      const errDetail = data?.detail || data?.message || data?.error_code || 'Endpoint returned 404';
-      const status = bachsRes ? bachsRes.status : 404;
+      const errDetail = data?.detail || data?.message || data?.error_code || 'Unable to establish session with Bachs';
+      const status = bachsRes ? bachsRes.status : 504;
       console.error('Bachs session error:', data);
       console.warn('Falling back to simulation mode due to Bachs API error.');
       return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
         checkout_id: `chk_mock_${Date.now()}`,
         is_simulation: true,
-        simulation_reason: `Bachs API error (${status} on ${lastUrl}): ${errDetail}`
+        simulation_reason: `Bachs API error (${status} on ${targetUrl}): ${errDetail}`
       }, 'Mock session created (API Fallback)');
     }
 
