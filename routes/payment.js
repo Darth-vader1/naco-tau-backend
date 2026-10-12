@@ -938,7 +938,6 @@ router.post('/webhook', async (req, res) => {
 
   res.sendStatus(200); // Immediately acknowledge Paystack
 
-  const event = req.body;
   if (event.event === 'charge.success') {
     const data = event.data;
     const reference = data.reference;

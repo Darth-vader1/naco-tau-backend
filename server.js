@@ -83,9 +83,14 @@ const allowedOrigins = [
   'http://127.0.0.1:8080',
 ];
 
-// Add custom FRONTEND_URL from env if provided
+// Add custom FRONTEND_URL from env if provided (supports comma-separated list)
 if (process.env.FRONTEND_URL) {
-  allowedOrigins.push(process.env.FRONTEND_URL);
+  const frontendUrls = process.env.FRONTEND_URL.split(',').map(url => url.trim());
+  frontendUrls.forEach(url => {
+    if (url && !allowedOrigins.includes(url)) {
+      allowedOrigins.push(url);
+    }
+  });
 }
 
 // Remove localhost origins in production unless ALLOW_LOCAL_CORS is true
@@ -93,19 +98,24 @@ const productionOrigins = (process.env.NODE_ENV === 'production' && process.env.
   ? allowedOrigins.filter(origin => !origin.includes('localhost') && !origin.includes('127.0.0.1'))
   : allowedOrigins;
 
+// Log allowed origins for debugging
+logger.info(`🔗 CORS allowed origins: ${productionOrigins.join(', ')}`);
+
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, Postman, or same-origin)
     if (!origin) return callback(null, true);
     
-    // Check if origin is in allowed list or any Vercel preview/production deployment
+    // Check if origin is in allowed list or any Vercel/Cloudflare deployment
     if (
       productionOrigins.includes(origin) ||
       origin.endsWith('.vercel.app') ||
+      origin.endsWith('.pages.dev') || // Cloudflare Pages
       origin === 'https://nacosportal.vercel.app'
     ) {
       callback(null, true);
     } else {
+      logger.warn(`⚠️ CORS blocked origin: ${origin}`);
       logger.security.suspiciousActivity('CORS_BLOCKED', { origin });
       callback(null, false);
     }
@@ -114,7 +124,8 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
+  preflightContinue: false
 };
 
 app.use(cors(corsOptions));
@@ -236,17 +247,8 @@ if (process.env.TRUST_PROXY) {
 
 app.use('/api/', globalLimiter);
 
-// Session tracking: monitor user sessions and detect expired/stale sessions.
-// Mounted AFTER the rate limiter on purpose: it makes an outbound Supabase call
-// per request and must not be reachable by unthrottled traffic.
-app.use(trackSession);
-logger.info('✅ Session tracking enabled');
-
-// ============================================
-// ROUTES
-// ============================================
-
-// Health check (no auth, no CSRF)
+// Health check (no auth, no CSRF, no session tracking — must be before trackSession)
+// Placed here so it is not affected by the Supabase-dependent session middleware.
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -259,6 +261,17 @@ app.get('/api/health', (req, res) => {
     }
   });
 });
+
+// Session tracking: monitor user sessions and detect expired/stale sessions.
+// Mounted AFTER the rate limiter on purpose: it makes an outbound Supabase call
+// per request and must not be reachable by unthrottled traffic.
+// Health check is excluded (defined above).
+app.use(trackSession);
+logger.info('✅ Session tracking enabled');
+
+// ============================================
+// ROUTES
+// ============================================
 
 // CSRF token endpoint (must be called before any CSRF-protected requests)
 // Frontend should fetch this token and include it in subsequent requests
