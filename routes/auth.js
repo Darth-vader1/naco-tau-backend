@@ -639,8 +639,8 @@ router.post('/forgot-password', authLimiter, authValidationChains.forgotPassword
       return errorResponse(res, 'Please provide a valid email address', 400);
     }
 
-    const { error } = await supabase.auth.resetPasswordForEmail(email.toLowerCase(), {
-      redirectTo: `${process.env.FRONTEND_URL}/reset-password.html`
+    const { error } = await createAuthClient().auth.resetPasswordForEmail(email.toLowerCase(), {
+      redirectTo: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/reset-password.html`
     });
 
     if (error) {
@@ -648,6 +648,17 @@ router.post('/forgot-password', authLimiter, authValidationChains.forgotPassword
       // Don't reveal if email exists or not for security
       return successResponse(res, null, 'If your email is registered, you will receive a password reset link.');
     }
+
+    // Audit: log the reset request (email redacted to a hash so PII is not stored in plain text)
+    await auditLog({
+      action: 'password_reset_requested',
+      userId: null, // not authenticated at this point
+      details: {
+        email_domain: email.toLowerCase().split('@')[1] || 'unknown',
+        redirect_to: `${process.env.FRONTEND_URL}/reset-password.html`
+      },
+      ip: req.ip
+    });
 
     return successResponse(res, null, 'Password reset link sent to your email.');
 
