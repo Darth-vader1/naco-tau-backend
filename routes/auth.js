@@ -288,10 +288,12 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       // auth.user will block any future signup attempt with the same
       // email, and the row is invisible in the default Dashboard view.
       await permanentlyDeleteAuthUser(authData.user.id);
-      const debugMsg = profileError?.message
-        ? `Registration failed: ${profileError.message}`
-        : 'Registration failed. Please contact support.';
-      return errorResponse(res, debugMsg, 500, profileError);
+      // Never expose internal Supabase error messages to clients in production
+      // (they reveal schema details like constraint names and column names).
+      const userMsg = process.env.NODE_ENV === 'production'
+        ? 'Registration failed. Please try again or contact support.'
+        : `Registration failed: ${profileError.message}`;
+      return errorResponse(res, userMsg, 500, profileError);
     }
 
     // Log registration
@@ -310,10 +312,11 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
 
   } catch (error) {
     console.error('Registration error:', error);
-    const debugMsg = error?.message
-      ? `Registration failed: ${error.message}`
-      : 'Registration failed. Please try again.';
-    return errorResponse(res, debugMsg, 500, error);
+    // Never expose internal error messages to clients in production.
+    const userMsg = process.env.NODE_ENV === 'production'
+      ? 'Registration failed. Please try again or contact support.'
+      : `Registration failed: ${error.message}`;
+    return errorResponse(res, userMsg, 500, error);
   }
 });
 

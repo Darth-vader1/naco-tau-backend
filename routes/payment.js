@@ -218,6 +218,9 @@ router.get('/paystack/config', (req, res) => {
 // ============================================
 // GET PAYMENT RECEIPT / STATUS BY REFERENCE
 // ============================================
+// Unauthenticated callers receive a public-safe subset (ticket status + event
+// info only — no student PII). Authenticated callers who own the payment
+// receive the full receipt including student details.
 router.get('/receipt/:reference', async (req, res) => {
   try {
     const { reference } = req.params;
@@ -236,45 +239,66 @@ router.get('/receipt/:reference', async (req, res) => {
       return errorResponse(res, 'Payment receipt not found', 404);
     }
 
-    // Fetch student info
-    let student = null;
-    if (payment.user_id) {
-      const { data: s } = await supabase
-        .from('students')
-        .select('name, email, matric_no, department, level')
-        .eq('user_id', payment.user_id)
-        .maybeSingle();
-      student = s;
-    }
+    // Resolve caller identity from Authorization header (optional — no 401 on failure)
+    let callerId = null;
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+        const token = authHeader.slice(7).trim();
+        if (token) {
+          const { data: userData } = await supabase.auth.getUser(token);
+          callerId = userData?.user?.id || null;
+        }
+      }
+    } catch (_) { /* non-fatal — treat as unauthenticated */ }
 
-    // Fetch event info if event_id is present
+    const isOwner = callerId && callerId === payment.user_id;
+
+    // Fetch event info (public — no PII)
     let event = null;
     let registration = null;
     if (payment.event_id) {
-      const { data: ev } = await supabase
-        .from('events')
-        .select('*')
-        .eq('id', payment.event_id)
-        .maybeSingle();
-      event = ev;
-
-      const { data: reg } = await supabase
-        .from('event_registrations')
-        .select('*')
-        .eq('linked_payment_id', payment.id)
-        .maybeSingle();
-      registration = reg;
+      const [evResult, regResult] = await Promise.all([
+        supabase.from('events').select('id, title, date, time, location, image_url').eq('id', payment.event_id).maybeSingle(),
+        supabase.from('event_registrations').select('*').eq('linked_payment_id', payment.id).maybeSingle()
+      ]);
+      event = evResult.data || null;
+      registration = regResult.data || null;
     }
 
-    const ticketNumber = registration?.ticket_number || ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') + '-' + payment.id.substring(0, 6).toUpperCase());
+    const ticketNumber = registration?.ticket_number ||
+      ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') +
+       '-' + payment.id.substring(0, 6).toUpperCase());
 
-    return successResponse(res, {
-      payment,
-      student,
+    // Public-safe payload: ticket status and event info only — no student PII
+    const publicPayload = {
+      ticket_number: ticketNumber,
+      status: payment.status,
+      payment_type: payment.payment_type,
+      amount: payment.amount,
+      verified_at: payment.verified_at,
+      submitted_at: payment.submitted_at,
       event,
-      registration,
-      ticket_number: ticketNumber
-    }, 'Receipt retrieved successfully');
+      registration
+    };
+
+    // Owners additionally receive their own student details
+    if (isOwner) {
+      const { data: student } = await supabase
+        .from('students')
+        .select('name, email, matric_no, department')
+        .eq('user_id', payment.user_id)
+        .maybeSingle();
+
+      return successResponse(res, {
+        ...publicPayload,
+        payment,   // full payment row for the owner
+        student    // PII only for the owner
+      }, 'Receipt retrieved successfully');
+    }
+
+    return successResponse(res, publicPayload, 'Receipt retrieved successfully');
+
   } catch (error) {
     console.error('Receipt lookup error:', error);
     return errorResponse(res, 'Failed to fetch receipt', 500, error);

@@ -106,13 +106,12 @@ const corsOptions = {
     // Allow requests with no origin (like mobile apps, Postman, or same-origin)
     if (!origin) return callback(null, true);
     
-    // Check if origin is in allowed list or any Vercel/Cloudflare deployment
-    if (
-      productionOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      origin.endsWith('.pages.dev') || // Cloudflare Pages
-      origin === 'https://nacosportal.vercel.app'
-    ) {
+    // Check if origin is in the explicit allow-list only.
+    // Wildcards like *.vercel.app are intentionally removed — they would allow
+    // any attacker-controlled Vercel project to make credentialed cross-origin
+    // requests to this API. All legitimate deployment URLs must be listed
+    // explicitly in allowedOrigins above or via the FRONTEND_URL env var.
+    if (productionOrigins.includes(origin)) {
       callback(null, true);
     } else {
       logger.warn(`⚠️ CORS blocked origin: ${origin}`);
