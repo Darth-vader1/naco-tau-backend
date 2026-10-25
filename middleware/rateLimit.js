@@ -1,148 +1,147 @@
 // backend/middleware/rateLimit.js
 //
-// Rate-limiting tiers (each exported individually; mounted only when needed).
-// NOTE: The global /api/* rate limiter is defined in server.js and reads
-// process.env.GLOBAL_RATE_LIMIT (default 100 req / 15 min). The duplicate
-// "globalLimiter" that used to live here (limit = 1000) was removed because
-// it was never mounted and created confusion about which limit was active.
+// Rate-limiting tiers. Each limiter is created via a factory function so that
+// server.js can inject the shared Redis store after it has been initialised.
+//
+// WHY FACTORIES?
+// On Vercel (and any other serverless platform) every cold start spins up a
+// fresh Node process with a brand-new in-memory store, making the window
+// counter reset on every invocation. The limiters are effectively useless.
+// Injecting a Redis store (e.g. Upstash via REDIS_URL) persists counters
+// across all instances and cold starts, making the limits real.
+//
+// USAGE in server.js:
+//   const { createAuthLimiter, createRegistrationLimiter, ... } = require('./middleware/rateLimit');
+//   const authLimiter = createAuthLimiter(redisStore);        // redisStore may be undefined → falls back to memory
+//   const registrationLimiter = createRegistrationLimiter(redisStore);
+//
+// NOTE: The global /api/* rate limiter is defined inline in server.js because
+// it needs the Redis store AND the token extractor at the same time.
 
 const rateLimit = require('express-rate-limit');
 
-// Common configuration for all limiters
-const commonConfig = {
-    standardHeaders: true,
-    legacyHeaders: false,
-    // Disable trust proxy validation warning
-    // Trust proxy is configured at app level in server.js
-    validate: { trustProxy: false }
+// Shared non-store config applied to every limiter
+const baseConfig = {
+  standardHeaders: true,   // Return RateLimit-* headers per RFC 6585
+  legacyHeaders: false,     // Disable X-RateLimit-* legacy headers
+  validate: { trustProxy: false } // Trust proxy is configured at app level
 };
 
-// ============================================
-// AUTH RATE LIMIT
-// ============================================
+// Helper: get rate-limit key by authenticated user ID if present, else IP.
+// Prevents campus Wi-Fi (shared IP) from triggering blanket blocks.
+const getUserOrIpKey = (req) =>
+  req.userId || (req.user && req.user.id) || req.ip;
 
-const authLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // 5 attempts
-    message: {
-        error: 'Too many login attempts. Please try again after 15 minutes.'
-    },
-    keyGenerator: (req) => {
-        return req.body.email || req.ip;
-    }
+// ============================================
+// AUTH RATE LIMIT  (login + forgot-password)
+// 5 attempts per 15 min, keyed on email or IP
+// ============================================
+const createAuthLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many login attempts. Please try again after 15 minutes.' },
+  keyGenerator: (req) => req.body?.email || req.ip
 });
 
 // ============================================
 // REGISTRATION RATE LIMIT
+// 3 new accounts per hour per IP
 // ============================================
-
-const registrationLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 3, // 3 registrations per IP
-    message: {
-        error: 'Too many registration attempts. Please try again later.'
-    }
+const createRegistrationLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  message: { error: 'Too many registration attempts. Please try again later.' }
 });
 
 // ============================================
-// Helper to get rate limit key (User ID if authenticated, else IP)
-const getUserOrIpKey = (req) => {
-    return req.userId || (req.user && req.user.id) || req.ip;
-};
-
-// ============================================
 // VOTING RATE LIMIT
+// 5 votes per 24 hours per user/IP
 // ============================================
-
-const votingLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 24 * 60 * 60 * 1000, // 24 hours
-    max: 5, // 5 votes per day
-    message: {
-        error: 'Voting limit reached. You can only vote 5 times per day.'
-    },
-    keyGenerator: getUserOrIpKey
+const createVotingLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 5,
+  message: { error: 'Voting limit reached. You can only vote 5 times per day.' },
+  keyGenerator: getUserOrIpKey
 });
 
 // ============================================
 // FILE UPLOAD RATE LIMIT
+// 20 uploads per hour per user/IP
 // ============================================
-
-const uploadLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 20, // 20 uploads per hour per user
-    message: {
-        error: 'Upload limit reached. Please try again later.'
-    },
-    keyGenerator: getUserOrIpKey
+const createUploadLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: { error: 'Upload limit reached. Please try again later.' },
+  keyGenerator: getUserOrIpKey
 });
 
 // ============================================
-// API RATE LIMIT (stricter, optional per-route)
+// API RATE LIMIT (optional per-route stricter cap)
+// 500 requests per hour per user/IP
 // ============================================
-
-const apiLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 500, // 500 requests per user
-    message: {
-        error: 'API rate limit exceeded. Please slow down your requests.'
-    },
-    keyGenerator: getUserOrIpKey
+const createApiLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 60 * 1000,
+  max: 500,
+  message: { error: 'API rate limit exceeded. Please slow down your requests.' },
+  keyGenerator: getUserOrIpKey
 });
 
 // ============================================
-// DIRECTORY RATE LIMIT (prevent scraping)
+// DIRECTORY RATE LIMIT  (prevent scraping)
+// 60 requests per minute per user/IP
 // ============================================
-
-const directoryLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 60, // 60 requests per minute per user
-    message: {
-        error: 'Directory access limit exceeded. Please slow down.'
-    },
-    keyGenerator: getUserOrIpKey
+const createDirectoryLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { error: 'Directory access limit exceeded. Please slow down.' },
+  keyGenerator: getUserOrIpKey
 });
 
 // ============================================
 // PROFILE VIEW RATE LIMIT
+// 120 views per minute per user/IP
 // ============================================
-
-const profileViewLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 120, // 120 profile views per minute
-    message: {
-        error: 'Profile view limit exceeded. Please slow down.'
-    },
-    keyGenerator: getUserOrIpKey
+const createProfileViewLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 1000,
+  max: 120,
+  message: { error: 'Profile view limit exceeded. Please slow down.' },
+  keyGenerator: getUserOrIpKey
 });
 
 // ============================================
 // PROFILE UPDATE RATE LIMIT
+// 10 updates per minute per user/IP
 // ============================================
-
-const profileUpdateLimiter = rateLimit({
-    ...commonConfig,
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 10, // 10 profile updates per minute
-    message: {
-        error: 'Profile update limit exceeded. Please wait before trying again.'
-    },
-    keyGenerator: getUserOrIpKey
+const createProfileUpdateLimiter = (store) => rateLimit({
+  ...baseConfig,
+  ...(store ? { store } : {}),
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Profile update limit exceeded. Please wait before trying again.' },
+  keyGenerator: getUserOrIpKey
 });
 
 module.exports = {
-    authLimiter,
-    registrationLimiter,
-    votingLimiter,
-    uploadLimiter,
-    apiLimiter,
-    directoryLimiter,
-    profileViewLimiter,
-    profileUpdateLimiter
+  createAuthLimiter,
+  createRegistrationLimiter,
+  createVotingLimiter,
+  createUploadLimiter,
+  createApiLimiter,
+  createDirectoryLimiter,
+  createProfileViewLimiter,
+  createProfileUpdateLimiter
 };

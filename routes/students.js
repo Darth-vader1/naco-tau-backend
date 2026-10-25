@@ -6,7 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { studentValidationChains, idParam, paginationQuery, validate } = require('../middleware/validation');
-const { directoryLimiter, profileViewLimiter, profileUpdateLimiter } = require('../middleware/rateLimit');
+const { instances: { directoryLimiter, profileViewLimiter, profileUpdateLimiter } } = require('../middleware/rateLimitInstances');
 
 /**
  * Permanently (HARD) delete a Supabase Auth user. Mirrors the helper in

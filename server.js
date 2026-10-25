@@ -186,6 +186,7 @@ if (process.env.ADMIN_IP_WHITELIST) {
 
 // Extract token helper for rate limiting key generation
 const { extractToken } = require('./middleware/auth');
+const { initRateLimiters } = require('./middleware/rateLimitInstances');
 const crypto = require('crypto');
 
 // Redis for persistent rate limiting across deployments
@@ -203,12 +204,17 @@ let redisStore;
 if (process.env.REDIS_URL && RedisStore) {
   const redisClient = new Redis(process.env.REDIS_URL);
   redisClient.on('error', (err) => console.error('Redis Client Error', err));
-  
+
   redisStore = new RedisStore({
     sendCommand: (...args) => redisClient.call(...args),
   });
   console.log('✅ Redis Rate Limiting Enabled');
 }
+
+// Upgrade ALL route-level limiters (authLimiter, directoryLimiter, etc.)
+// to use the Redis store. Must be called before any request is handled.
+// If redisStore is undefined, limiters keep their in-memory fallback.
+initRateLimiters(redisStore);
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes

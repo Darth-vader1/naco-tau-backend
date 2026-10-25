@@ -4,16 +4,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { errorResponse, successResponse } = require('../utils/helpers');
 const { sendBulkEmail, getEmailTemplate, getActiveStudents } = require('../services/email');
-const { rateLimit } = require('express-rate-limit');
-
-// Rate limiter specifically for broadcasting to prevent abuse
-const broadcastLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour window
-    max: 10, // Limit each IP to 10 broadcast requests per windowMs
-    message: { error: 'Too many broadcasts sent from this IP, please try again after an hour' },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
+const { instances: { apiLimiter: broadcastLimiter } } = require('../middleware/rateLimitInstances');
 
 /**
  * @route   POST /api/emails/preview-recipients
