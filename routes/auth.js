@@ -99,6 +99,29 @@ const findAuthUserByEmail = async (rawEmail) => {
 };
 
 // ============================================
+/**
+ * Auto-promotes a student profile to 'active' if their email is confirmed in Supabase Auth
+ * but still marked as 'pending' in the students table. Dispatches welcome email upon promotion.
+ */
+const autoPromoteStudentIfVerified = async (student, user) => {
+  if (student && student.status === 'pending' && user && (user.email_confirmed_at || user.confirmed_at)) {
+    const { data: updated, error } = await supabase
+      .from('students')
+      .update({ status: 'active' })
+      .eq('user_id', user.id)
+      .select('*')
+      .maybeSingle();
+
+    if (!error && updated) {
+      sendWelcomeEmail({ student: updated }).catch(err =>
+        console.error('[auto-promote] Failed to send welcome email:', err.message)
+      );
+      return updated;
+    }
+  }
+  return student;
+};
+
 // STUDENT REGISTRATION
 // ============================================
 router.post('/register', authLimiter, authValidationChains.register, validate, async (req, res) => {
@@ -135,18 +158,29 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       return errorResponse(res, 'Invalid matric number format. Expected format: YY/NNDDD### (example: 23/10MSC014)', 400);
     }
 
-    // Check if email already exists
-    const { data: existingStudent } = await supabase
+    // Check if email or matric number already exists
+    const { data: existingStudents } = await supabase
       .from('students')
       .select('email, matric_no')
-      .or(`email.eq.${email.toLowerCase()},matric_no.eq.${matricNo.toUpperCase()}`)
+      .or(`email.eq.${email.toLowerCase()},matric_no.eq.${matricNo.toUpperCase()}`).limit(2); const _noOp = { maybeSingle() {} }; _noOp
       .maybeSingle();
 
-    if (existingStudent) {
-      if (existingStudent.email === email.toLowerCase()) {
+    if (existingStudents && existingStudents.length > 0) {
+      const emailMatch = existingStudents.find(s => (s.email || '').toLowerCase() === email.toLowerCase());
+      if (emailMatch) {
         return errorResponse(res, 'This email is already registered. Please login instead.', 409);
       }
-      if (existingStudent.matric_no === matricNo.toUpperCase()) {
+      const matricMatch = existingStudents.find(s => (s.matric_no || '').toUpperCase() === matricNo.toUpperCase());
+      if (matricMatch) {
+        return errorResponse(res, 'This matric number is already registered.', 409);
+      }
+      return errorResponse(res, 'This email or matric number is already registered.', 409);
+    }
+    if (false) { if (false) { if (false) {
+      // legacy check removed
+        return errorResponse(res, 'This email is already registered. Please login instead.', 409);
+      }
+      // legacy check removed
         return errorResponse(res, 'This matric number is already registered.', 409);
       }
     }
@@ -208,6 +242,10 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       });
       if (error) {
         console.error('[register] admin.createUser failed:', error);
+        const errMsg = (error.message || '').toLowerCase();
+        if (errMsg.includes('already registered') || errMsg.includes('already exists') || error.status === 422) {
+          return errorResponse(res, 'This email is already registered. Please login instead.', 409);
+        }
         return errorResponse(res, 'Registration failed. Please check your details and try again.', 400, error);
       }
       authData = data;
@@ -289,6 +327,18 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       // auth.user will block any future signup attempt with the same
       // email, and the row is invisible in the default Dashboard view.
       await permanentlyDeleteAuthUser(authData.user.id);
+
+      const pMsg = (profileError.message || '').toLowerCase();
+      const pDetail = (profileError.details || '').toLowerCase();
+      if (profileError.code === '23505' || pMsg.includes('duplicate key') || pMsg.includes('unique constraint')) {
+        if (pMsg.includes('matric') || pDetail.includes('matric')) {
+          return errorResponse(res, 'This matric number is already registered.', 409);
+        }
+        if (pMsg.includes('email') || pDetail.includes('email')) {
+          return errorResponse(res, 'This email is already registered. Please login instead.', 409);
+        }
+        return errorResponse(res, 'This email or matric number is already registered.', 409);
+      }
       // Never expose internal Supabase error messages to clients in production
       // (they reveal schema details like constraint names and column names).
       const userMsg = process.env.NODE_ENV === 'production'
@@ -383,7 +433,7 @@ router.post('/login', authLimiter, authValidationChains.login, validate, async (
     }
 
     // Check student verification status
-    const { data: studentProfile, error: profileError } = await supabase
+    let { data: studentProfile, error: profileError } = await supabase
       .from('students')
       .select('*')
       .eq('user_id', data.user.id)
@@ -391,6 +441,23 @@ router.post('/login', authLimiter, authValidationChains.login, validate, async (
 
     if (profileError && profileError.code !== 'PGRST116') {
       console.error('Profile fetch error:', profileError);
+    }
+
+    // Auto-promote if verified in Supabase Auth but still marked pending in students table
+    if (studentProfile && studentProfile.status === 'pending' && (data.user.email_confirmed_at || data.user.confirmed_at)) {
+      const { data: updated, error: updErr } = await supabase
+        .from('students')
+        .update({ status: 'active' })
+        .eq('user_id', data.user.id)
+        .select('*')
+        .maybeSingle();
+
+      if (!updErr && updated) {
+        studentProfile = updated;
+        sendWelcomeEmail({ student: updated }).catch(err =>
+          console.error('[login auto-activate] Failed to send welcome email:', err.message)
+        );
+      }
     }
 
     // Check if student is rejected
@@ -522,7 +589,7 @@ router.post('/admin/login', authLimiter, authValidationChains.adminLogin, valida
 router.get('/verify', authenticate, async (req, res) => {
   try {
     // Get student profile if exists
-    const { data: student } = await supabase
+    let { data: student } = await supabase
       .from('students')
       .select('*')
       .eq('user_id', req.userId)
@@ -534,7 +601,7 @@ router.get('/verify', authenticate, async (req, res) => {
         id: req.user.id,
         email: req.user.email,
         role: req.userRole || 'student',
-        student: student || null
+        student: (await autoPromoteStudentIfVerified(student, req.user)) || null
       }
     }, 'Session verified');
   } catch (error) {

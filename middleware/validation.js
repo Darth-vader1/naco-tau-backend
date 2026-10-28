@@ -55,10 +55,10 @@ const authValidationChains = {
       .matches(/[!@#$%^&*()_+\-=\[\]{};:'",.<>/?\\|`~]/).withMessage('password must contain a special character'),
     body('firstName').exists().withMessage('firstName is required').bail()
       .isLength({ min: 2, max: 50 }).withMessage('firstName must be 2-50 characters')
-      .trim().escape(),
+      .trim(),
     body('lastName').exists().withMessage('lastName is required').bail()
       .isLength({ min: 2, max: 50 }).withMessage('lastName must be 2-50 characters')
-      .trim().escape(),
+      .trim(),
     body('matricNo')
       .exists().withMessage('matricNo is required').bail()
       .trim()
@@ -103,9 +103,9 @@ const authValidationChains = {
 const studentValidationChains = {
   updateProfile: [
     body('firstName').optional()
-      .isLength({ min: 2, max: 50 }).withMessage('firstName must be 2-50 characters').trim().escape(),
+      .isLength({ min: 2, max: 50 }).withMessage('firstName must be 2-50 characters').trim(),
     body('lastName').optional()
-      .isLength({ min: 2, max: 50 }).withMessage('lastName must be 2-50 characters').trim().escape(),
+      .isLength({ min: 2, max: 50 }).withMessage('lastName must be 2-50 characters').trim(),
     body('phone').optional()
       .custom((v) => !v || v === '' || v === null || /^(\+234|0)[789][01]\d{8}$/.test(String(v).replace(/\s/g, '')))
       .withMessage('phone must be a valid Nigerian number'),
@@ -134,12 +134,15 @@ const studentValidationChains = {
     body('skills.*').optional().isLength({ min: 1, max: 50 }).withMessage('each skill must be 1-50 characters').trim(),
     body('interests').optional().isArray({ max: 10 }).withMessage('interests must be an array (max 10 items)'),
     body('interests.*').optional().isLength({ min: 1, max: 50 }).withMessage('each interest must be 1-50 characters').trim(),
-    body('year_of_study').optional()
-      .isInt({ min: 2020, max: new Date().getFullYear() + 1 })
-      .withMessage(`year_of_study must be a year between 2020 and ${new Date().getFullYear() + 1}`),
-    body('graduation_year').optional()
-      .isInt({ min: new Date().getFullYear(), max: new Date().getFullYear() + 10 })
-      .withMessage(`graduation_year must be between ${new Date().getFullYear()} and ${new Date().getFullYear() + 10}`),
+    body('current_level').optional({ nullable: true })
+      .custom((v) => !v || [100, 200, 300, 400, 500].includes(Number(v)))
+      .withMessage('current_level must be 100, 200, 300, 400, or 500'),
+    body('year_of_study').optional({ nullable: true })
+      .isInt({ min: 2018, max: new Date().getFullYear() + 1 })
+      .withMessage(`year_of_study must be a year between 2018 and ${new Date().getFullYear() + 1}`),
+    body('graduation_year').optional({ nullable: true })
+      .isInt({ min: 2024, max: new Date().getFullYear() + 10 })
+      .withMessage(`graduation_year must be between 2024 and ${new Date().getFullYear() + 10}`),
     body('visibility').optional()
       .isIn(['public', 'students-only', 'private']).withMessage('visibility must be one of: public, students-only, private'),
     body('privacy_settings').optional()
