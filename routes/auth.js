@@ -5,6 +5,7 @@ const { supabase, createAuthClient } = require('../config/supabase');
 const { authenticate, requireAdmin, extractToken, invalidateAuthCache } = require('../middleware/auth');
 const { instances: { authLimiter } } = require('../middleware/rateLimitInstances');
 const { auditLog } = require('../middleware/audit');
+const { sendWelcomeEmail, sendNewStudentAdminNotification } = require('../services/email');
 const { validateEmail, validatePassword, validateMatricNo } = require('../utils/validators');
 const { isAdminEmailAllowed, getAdminEmails, successResponse, errorResponse } = require('../utils/helpers');
 const { authValidationChains, validate } = require('../middleware/validation');
@@ -303,6 +304,21 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       details: { email, matricNo, firstName, lastName },
       ip: req.ip
     });
+
+    // Send welcome email to student + new-member alert to admin.
+    // Both fire async — email failures never block or break the signup response.
+    const studentForEmail = {
+      email,
+      first_name: firstName,
+      last_name:  lastName,
+      name:       `${firstName} ${lastName}`,
+      matric_no:  matricNo.toUpperCase(),
+      department: department || 'Computer Science'
+    };
+    Promise.all([
+      sendWelcomeEmail({ student: studentForEmail }),
+      sendNewStudentAdminNotification({ student: studentForEmail })
+    ]).catch(err => console.error('[register] Email dispatch error (non-fatal):', err.message));
 
     return successResponse(res, {
       id: authData.user.id,

@@ -822,6 +822,119 @@ function triggerAutoContentBroadcast(contentType, itemData, options = {}) {
 }
 
 // ============================================
+// SEND WELCOME EMAIL (new student registration)
+// ============================================
+async function sendWelcomeEmail({ student }) {
+    if (!student || !student.email) return;
+    try {
+        const firstName   = student.first_name || student.name?.split(' ')[0] || 'Student';
+        const fullName    = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'Student';
+        const matricNo    = student.matric_no || 'N/A';
+        const department  = student.department || 'Computer Science';
+        const dashboardUrl = `${FRONTEND_URL}/student-dashboard.html`;
+        const portalUrl    = `${FRONTEND_URL}/index.html`;
+
+        const metaRows = [
+            { label: 'Full Name',   value: `<strong>${fullName}</strong>` },
+            { label: 'Matric No',   value: `<code style="background:#f1f5f9; padding:2px 8px; border-radius:4px; font-size:13px; font-weight:700; color:#1b8c0c;">${matricNo}</code>` },
+            { label: 'Department',  value: department },
+            { label: 'Email',       value: student.email },
+            { label: 'Status',      value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">✓ Active</span>` },
+        ];
+
+        const extraHtml = `
+            <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 18px 20px; margin: 20px 0;">
+                <p style="margin: 0 0 10px; font-size: 15px; font-weight: 700; color: #166534;">🎉 You're now part of the NACOS TAU family!</p>
+                <p style="margin: 0; font-size: 13.5px; color: #15803d; line-height: 1.6;">
+                    As a member, you get access to past exam questions, course timetables, academic resources, 
+                    hackathons, career paths, events, and the student networking directory.
+                </p>
+            </div>
+            <p style="font-size: 14px; color: #475569; margin: 18px 0 4px; font-weight: 600;">What you can do on the portal:</p>
+            <ul style="font-size: 13.5px; color: #4a5568; padding-left: 20px; line-height: 2; margin: 0 0 20px;">
+                <li>📚 Download past questions &amp; lecture notes</li>
+                <li>📅 View your class timetable</li>
+                <li>🏆 Register for hackathons &amp; competitions</li>
+                <li>💼 Explore career paths &amp; internships</li>
+                <li>🎫 Register and pay for NACOS events</li>
+                <li>🤝 Connect with fellow computing students</li>
+            </ul>
+        `;
+
+        const html = renderBaseLayout({
+            headerBadge:    'Welcome to NACOS TAU',
+            headerTitle:    `Welcome, ${firstName}! 🎉`,
+            headerSubtitle: 'Nigerian Association of Computing Students — TAU Chapter',
+            contentTitle:   'Your account is ready',
+            metaRows,
+            extraHtml,
+            buttonText:  'Go to My Dashboard',
+            buttonUrl:   dashboardUrl,
+            noticeText:  `Need help? Reach us at nacos@tau.edu.ng or visit <a href="${portalUrl}" style="color:#1b8c0c;">nacosportal.vercel.app</a>`
+        });
+
+        return await sendEmail({
+            to:      student.email,
+            subject: `🎉 Welcome to NACOS TAU, ${firstName}! Your account is active`,
+            html,
+            text: `Hi ${firstName},\n\nWelcome to the Nigerian Association of Computing Students, Thomas Adewumi University Chapter!\n\nYour account is now active.\nMatric No: ${matricNo}\nDepartment: ${department}\n\nVisit your dashboard: ${dashboardUrl}\n\nNACOS TAU Chapter`
+        });
+    } catch (err) {
+        console.error('[sendWelcomeEmail] Failed to send welcome email:', err.message);
+    }
+}
+
+// ============================================
+// SEND ADMIN NOTIFICATION (new student registration)
+// ============================================
+async function sendNewStudentAdminNotification({ student }) {
+    try {
+        const adminEmail  = process.env.ADMIN_EMAIL || 'nacos@tau.edu.ng';
+        const fullName    = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'Student';
+        const matricNo    = student.matric_no || 'N/A';
+        const department  = student.department || 'Computer Science';
+        const dateStr     = new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
+        const adminUrl    = `${FRONTEND_URL}/admin-dashboard.html`;
+
+        const metaRows = [
+            { label: 'Full Name',   value: `<strong>${fullName}</strong>` },
+            { label: 'Email',       value: student.email },
+            { label: 'Matric No',   value: `<code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">${matricNo}</code>` },
+            { label: 'Department',  value: department },
+            { label: 'Registered',  value: dateStr },
+        ];
+
+        const html = renderBaseLayout({
+            headerBadge:    'New Registration',
+            headerTitle:    '👤 New Student Registered',
+            headerSubtitle: `${fullName} just created an account`,
+            contentTitle:   'New member joined NACOS TAU',
+            metaRows,
+            extraHtml: `
+                <div style="background:#f8fafc; border-left:4px solid #1b8c0c; padding:12px 16px; margin:18px 0; font-size:14px; color:#334155; border-radius:0 6px 6px 0;">
+                    This student self-registered through the NACOS portal. Their account is now active.
+                </div>
+            `,
+            buttonText:  'View Admin Dashboard',
+            buttonUrl:   adminUrl,
+            noticeText:  'NACOS TAU — Student Registration Notification'
+        });
+
+        const recipients = ['nacos@tau.edu.ng'];
+        if (adminEmail && adminEmail !== 'nacos@tau.edu.ng') recipients.push(adminEmail);
+
+        return await sendEmail({
+            to:      recipients,
+            subject: `👤 New Member: ${fullName} (${matricNo}) just registered`,
+            html,
+            text: `New student registered on NACOS TAU portal.\n\nName: ${fullName}\nEmail: ${student.email}\nMatric: ${matricNo}\nDepartment: ${department}\nTime: ${dateStr}\n\nNACOS TAU Portal`
+        });
+    } catch (err) {
+        console.error('[sendNewStudentAdminNotification] Failed:', err.message);
+    }
+}
+
+// ============================================
 // SEND EVENT TICKET CONFIRMATION EMAIL
 // ============================================
 async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
@@ -944,6 +1057,8 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
 module.exports = {
     sendEmail,
     sendBulkEmail,
+    sendWelcomeEmail,
+    sendNewStudentAdminNotification,
     sendEventTicketEmail,
     sendPaymentAdminNotificationEmail,
     getActiveStudents,

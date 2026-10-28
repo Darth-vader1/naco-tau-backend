@@ -50,6 +50,7 @@ const uploadRoutes = require('./routes/upload');
 const adminRoutes = require('./routes/admin');
 const hackathonRoutes = require('./routes/hackathons');
 const pastExecutiveRoutes = require('./routes/pastExecutives');
+const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
 
@@ -331,6 +332,9 @@ app.use('/api/admin', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], 
 // Audit logs route (admin only)
 const auditLogRoutes = require('./routes/auditLogs');
 app.use('/api/audit-logs', auditLogRoutes);
+
+// Resource Activity Analytics (Views, Downloads, Saves)
+app.use('/api/analytics', analyticsRoutes);
 
 // Serve root
 app.get('/', (req, res) => {
