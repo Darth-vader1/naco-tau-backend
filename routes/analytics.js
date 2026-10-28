@@ -116,7 +116,7 @@ router.post('/track', optionalAuth, async (req, res) => {
       (async () => {
         try {
           if (sanitizedType === 'academic_resource' && sanitizedAction === 'download') {
-            await supabase.rpc('increment_download_count', { row_id: resource_id }).catch(() => {});
+            await supabase.rpc('increment_download_count', { row_id: resource_id });
           }
         } catch (_) {}
       })();
