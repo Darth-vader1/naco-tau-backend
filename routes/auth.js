@@ -320,11 +320,29 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       sendNewStudentAdminNotification({ student: studentForEmail })
     ]).catch(err => console.error('[register] Email dispatch error (non-fatal):', err.message));
 
+    // Trigger Supabase to dispatch the 6-digit confirmation code / OTP immediately
+    let otpDispatched = false;
+    try {
+      const { error: resendErr } = await createAuthClient().auth.resend({
+        type: 'signup',
+        email: email.toLowerCase().trim()
+      });
+      if (resendErr) {
+        console.warn('[register] Supabase resend OTP notice:', resendErr.message);
+      } else {
+        otpDispatched = true;
+        console.log('✅ [register] Supabase verification OTP dispatched successfully to', email);
+      }
+    } catch (resendCatch) {
+      console.warn('[register] Supabase resend OTP exception:', resendCatch.message);
+    }
+
     return successResponse(res, {
       id: authData.user.id,
       email: authData.user.email,
-      session
-    }, 'Registration successful! Your account is now active.', 201);
+      session,
+      otpSent: otpDispatched
+    }, 'Registration successful! Verification code sent to your email.', 201);
 
   } catch (error) {
     console.error('Registration error:', error);
@@ -596,7 +614,8 @@ router.get('/session-status', authenticate, async (req, res) => {
       const metadata = req.sessionMetadata;
       const now = Date.now();
       
-      sessionInfo.session = {
+      session,
+      otpSent: otpDispatchedInfo.session = {
         createdAt: new Date(metadata.createdAt).toISOString(),
         lastActivityAt: new Date(metadata.lastActivityAt).toISOString(),
         refreshCount: metadata.refreshCount,
