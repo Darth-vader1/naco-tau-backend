@@ -614,8 +614,7 @@ router.get('/session-status', authenticate, async (req, res) => {
       const metadata = req.sessionMetadata;
       const now = Date.now();
       
-      session,
-      otpSent: otpDispatchedInfo.session = {
+      sessionInfo.session = {
         createdAt: new Date(metadata.createdAt).toISOString(),
         lastActivityAt: new Date(metadata.lastActivityAt).toISOString(),
         refreshCount: metadata.refreshCount,
