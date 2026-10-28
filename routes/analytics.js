@@ -6,6 +6,12 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin, optionalAuth } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
 
+// Helper to validate UUID strings
+function isValidUuid(str) {
+  if (!str || typeof str !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str.trim());
+}
+
 // Helper to sanitize IP address
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
@@ -91,7 +97,7 @@ router.post('/track', optionalAuth, async (req, res) => {
       department: department,
       level: level,
       resource_type: sanitizedType,
-      resource_id: resource_id || null,
+      resource_id: resource_id ? String(resource_id) : null,
       resource_title: String(resource_title).substring(0, 255),
       course_code: course_code ? String(course_code).toUpperCase().trim().substring(0, 32) : null,
       action: sanitizedAction,
