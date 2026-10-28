@@ -305,7 +305,7 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       ip: req.ip
     });
 
-    // Send welcome email to student + new-member alert to admin.
+    // Send new-member alert to admin (welcome email is deferred until OTP verification in /activate-profile).
     // Both fire async — email failures never block or break the signup response.
     const studentForEmail = {
       email,
@@ -315,10 +315,10 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       matric_no:  matricNo.toUpperCase(),
       department: department || 'Computer Science'
     };
-    Promise.all([
-      sendWelcomeEmail({ student: studentForEmail }),
-      sendNewStudentAdminNotification({ student: studentForEmail })
-    ]).catch(err => console.error('[register] Email dispatch error (non-fatal):', err.message));
+
+
+    sendNewStudentAdminNotification({ student: studentForEmail })
+      .catch(err => console.error('[register] Admin notification error (non-fatal):', err.message));
 
     // Trigger Supabase to dispatch the 6-digit confirmation code / OTP immediately
     let otpDispatched = false;
@@ -711,6 +711,8 @@ router.post('/forgot-password', authLimiter, authValidationChains.forgotPassword
 router.post('/activate-profile', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
+    const { data: existingStudent } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
+    const wasPending = existingStudent ? (existingStudent.status !== 'active') : true;
 
     const { error } = await supabase
       .from('students')
@@ -720,6 +722,13 @@ router.post('/activate-profile', authenticate, async (req, res) => {
     if (error) {
       console.error('Failed to activate profile:', error);
       return errorResponse(res, 'Failed to activate profile', 500);
+    }
+
+    // Send welcome email now that the account is genuinely verified and active
+    if (wasPending && existingStudent && existingStudent.email) {
+      sendWelcomeEmail({ student: existingStudent }).catch(err =>
+        console.error('[activate-profile] Failed to send welcome email (non-fatal):', err.message)
+      );
     }
 
     return successResponse(res, null, 'Profile activated successfully');

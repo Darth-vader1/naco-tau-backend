@@ -912,7 +912,7 @@ async function sendNewStudentAdminNotification({ student }) {
             metaRows,
             extraHtml: `
                 <div style="background:#f8fafc; border-left:4px solid #1b8c0c; padding:12px 16px; margin:18px 0; font-size:14px; color:#334155; border-radius:0 6px 6px 0;">
-                    This student self-registered through the NACOS portal. Their account is now active.
+                    This student self-registered through the NACOS portal. A verification code has been dispatched to their email.
                 </div>
             `,
             buttonText:  'View Admin Dashboard',

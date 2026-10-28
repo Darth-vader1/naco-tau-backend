@@ -315,22 +315,45 @@ router.put('/:id/verify', authenticate, requireAdmin, idParam('id'), validate, a
 
     const newStatus = action === 'approve' ? 'active' : 'rejected';
 
-    const { data, error } = await supabase
+    let updatePayload = {
+      status: newStatus,
+      verified_at: new Date().toISOString(),
+      verified_by: req.userId
+    };
+
+    let { data, error } = await supabase
       .from('students')
-      .update({
-        status: newStatus,
-        verified_at: new Date().toISOString(),
-        verified_by: req.userId
-      })
+      .update(updatePayload)
       .eq('id', id)
       .select()
       .single();
+
+    if (error && (error.code === '42703' || String(error.message || '').toLowerCase().includes('column'))) {
+      // If verified_at or verified_by column doesn't exist, fall back to updating status only
+      const fallback = await supabase
+        .from('students')
+        .update({ status: newStatus })
+        .eq('id', id)
+        .select()
+        .single();
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (error) {
       if (error.code === 'PGRST116') {
         return errorResponse(res, 'Student not found', 404);
       }
       throw error;
+    }
+
+    // If approving, also ensure auth user is confirmed so they can log in
+    if (newStatus === 'active' && data.user_id) {
+      try {
+        await supabase.auth.admin.updateUserById(data.user_id, { email_confirm: true });
+      } catch (authErr) {
+        console.warn('[verify] could not confirm auth user:', authErr?.message || authErr);
+      }
     }
 
     // Log verification
