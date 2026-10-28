@@ -39,6 +39,63 @@ const permanentlyDeleteAuthUser = async (userId) => {
   console.warn('[students.js] permanentlyDeleteAuthUser: all branches failed for', userId, 'last error:', lastErr?.message || lastErr);
 };
 
+/**
+ * Calculate dynamic student level and graduation status
+ */
+const calculateStudentLevel = (student) => {
+  if (student && student.current_level) {
+    return {
+      current_level: student.current_level,
+      is_graduated: Boolean(student.is_graduated)
+    };
+  }
+
+  let year = student ? student.year_of_study : null;
+  if (!year && student && student.matric_no) {
+    const match = String(student.matric_no).trim().match(/^(\d{2})\//);
+    if (match) {
+      year = 2000 + parseInt(match[1], 10);
+    } else {
+      const tauMatch = String(student.matric_no).trim().match(/TAU\/[A-Z]+\/(\d{2,4})\//i);
+      if (tauMatch) {
+        year = tauMatch[1].length === 2 ? 2000 + parseInt(tauMatch[1], 10) : parseInt(tauMatch[1], 10);
+      }
+    }
+  }
+
+  if (!year || isNaN(year)) {
+    return {
+      current_level: null,
+      is_graduated: false
+    };
+  }
+
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentAcadYear = now.getMonth() >= 8 ? currentYear : currentYear - 1;
+  const yearsDiff = currentAcadYear - year;
+  const calculatedLevel = (yearsDiff + 1) * 100;
+  const duration = (student && student.program_duration) || 4;
+  const maxLevel = duration * 100;
+
+  if (calculatedLevel > maxLevel) {
+    return {
+      current_level: maxLevel,
+      is_graduated: true
+    };
+  } else if (calculatedLevel < 100) {
+    return {
+      current_level: 100,
+      is_graduated: false
+    };
+  } else {
+    return {
+      current_level: calculatedLevel,
+      is_graduated: false
+    };
+  }
+};
+
 // ============================================
 // GET ALL STUDENTS (Admin)
 // ============================================
@@ -55,13 +112,15 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
 
     // Use the view that includes calculated current_level
     let query = supabase
-      .from('students_with_current_level')
+      .from('students')
       .select('*', { count: 'exact' });
 
     if (search && String(search).trim() !== '') {
       const s = String(search).trim();
       query = query.or(
         `name.ilike.%${s}%,` +
+        `first_name.ilike.%${s}%,` +
+        `last_name.ilike.%${s}%,` +
         `matric_no.ilike.%${s}%,` +
         `email.ilike.%${s}%`
       );
@@ -85,8 +144,17 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
 
     if (error) throw error;
 
+    const enrichedStudents = (data || []).map(s => {
+      const levelInfo = calculateStudentLevel(s);
+      return {
+        ...s,
+        current_level: s.current_level || levelInfo.current_level,
+        is_graduated: s.is_graduated !== undefined ? s.is_graduated : levelInfo.is_graduated
+      };
+    });
+
     return successResponse(res, {
-      students: data,
+      students: enrichedStudents,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
