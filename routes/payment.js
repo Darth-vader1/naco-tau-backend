@@ -528,6 +528,10 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
         throw regErr;
       }
       registrationRecord = reg;
+      try {
+        const { count: c } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', targetEvent.id);
+        if (typeof c === 'number') await supabase.from('events').update({ current_attendees: c }).eq('id', targetEvent.id);
+      } catch (_) {}
 
       // 6. Send Ticket & Admin Payment Alert Emails asynchronously
       (async () => {
@@ -637,6 +641,126 @@ router.get('/my', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Payments fetch error:', error);
     return errorResponse(res, 'Failed to fetch payments', 500, error);
+  }
+});
+
+// ============================================
+// EXPORT PAYMENTS AS CSV (Admin)
+// ============================================
+router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { status, payment_type, event_id } = req.query;
+
+    let query = supabase
+      .from('payments')
+      .select('*')
+      .order('submitted_at', { ascending: false });
+
+    if (status) query = query.eq('status', status);
+    if (payment_type) query = query.eq('payment_type', payment_type);
+    if (event_id) query = query.eq('event_id', event_id);
+
+    const { data: payments, error } = await query;
+    if (error) throw error;
+
+    // Join student details
+    const userIds = [...new Set((payments || []).map(p => p.user_id).filter(Boolean))];
+    let studentMap = {};
+    if (userIds.length > 0) {
+      const { data: studentsData } = await supabase
+        .from('students')
+        .select('user_id, name, first_name, last_name, email, matric_no, department')
+        .in('user_id', userIds);
+      studentMap = (studentsData || []).reduce((acc, s) => {
+        acc[s.user_id] = s;
+        return acc;
+      }, {});
+    }
+
+    // Join event details
+    const eventIds = [...new Set((payments || []).map(p => p.event_id).filter(Boolean))];
+    let eventMap = {};
+    if (eventIds.length > 0) {
+      const { data: eventsData } = await supabase
+        .from('events')
+        .select('id, title, date')
+        .in('id', eventIds);
+      eventMap = (eventsData || []).reduce((acc, e) => {
+        acc[e.id] = e;
+        return acc;
+      }, {});
+    }
+
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const headers = [
+      'Transaction Ref',
+      'Student Name',
+      'Matric No',
+      'Student Email',
+      'Department',
+      'Purpose / Event',
+      'Payment Type',
+      'Amount (NGN)',
+      'Status',
+      'Gateway',
+      'Ticket Number',
+      'Date Submitted',
+      'Verified At'
+    ];
+
+    const rows = (payments || []).map(p => {
+      const student = studentMap[p.user_id];
+      const studentName = student ? (student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim()) : 'Student';
+      const matricNo = student?.matric_no || '';
+      const email = student?.email || '';
+      const department = student?.department || '';
+      const eventInfo = p.event_id ? eventMap[p.event_id] : null;
+      const purpose = eventInfo?.title || p.description || (p.payment_type === 'event_registration' ? 'Event Registration' : 'Payment');
+      const amount = Number(p.amount) || 0;
+      const gateway = p.gateway || (p.transaction_id?.startsWith('bach_') ? 'Bachs' : 'Paystack');
+      const dateSubmitted = p.submitted_at || p.created_at ? new Date(p.submitted_at || p.created_at).toISOString() : '';
+      const verifiedAt = p.verified_at ? new Date(p.verified_at).toISOString() : '';
+
+      return [
+        escapeCsv(p.transaction_id || p.id || ''),
+        escapeCsv(studentName),
+        escapeCsv(matricNo),
+        escapeCsv(email),
+        escapeCsv(department),
+        escapeCsv(purpose),
+        escapeCsv(p.payment_type || 'event_registration'),
+        escapeCsv(amount),
+        escapeCsv(p.status || 'verified'),
+        escapeCsv(gateway),
+        escapeCsv(p.ticket_number || ''),
+        escapeCsv(dateSubmitted),
+        escapeCsv(verifiedAt)
+      ].join(',');
+    });
+
+    const csvContent = '\uFEFF' + [headers.map(h => `"${h}"`).join(','), ...rows].join('\r\n');
+    const dateStamp = new Date().toISOString().split('T')[0];
+    const filename = `nacos_payments_${dateStamp}.csv`;
+
+    await auditLog({
+      action: 'payments_exported_csv',
+      userId: req.userId,
+      details: { count: rows.length, status: status || 'all', payment_type: payment_type || 'all' },
+      ip: req.ip
+    });
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csvContent);
+
+  } catch (error) {
+    console.error('Payments CSV export error:', error);
+    return errorResponse(res, 'Failed to export payments CSV', 500, error);
   }
 });
 
@@ -797,6 +921,10 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
             );
 
           if (regErr) throw regErr;
+          try {
+            const { count: c } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', data.event_id);
+            if (typeof c === 'number') await supabase.from('events').update({ current_attendees: c }).eq('id', data.event_id);
+          } catch (_) {}
 
           await auditLog({
             action: 'event_registration_auto_created',

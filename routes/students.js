@@ -170,6 +170,136 @@ router.get('/', authenticate, requireAdmin, paginationQuery, validate, async (re
 });
 
 // ============================================
+// EXPORT STUDENTS DIRECTORY AS CSV (Admin)
+// ============================================
+router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { status, department, search, year } = req.query;
+
+    let query = supabase
+      .from('students')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+    if (normalizedStatus && normalizedStatus !== 'all') {
+      query = query.eq('status', normalizedStatus);
+    }
+
+    if (department && String(department).trim() !== '') {
+      query = query.eq('department', String(department).trim());
+    }
+
+    if (search && String(search).trim() !== '') {
+      const s = String(search).trim().replace(/,/g, ' ');
+      query = query.or(
+        `name.ilike.%${s}%,` +
+        `first_name.ilike.%${s}%,` +
+        `last_name.ilike.%${s}%,` +
+        `matric_no.ilike.%${s}%,` +
+        `email.ilike.%${s}%`
+      );
+    }
+
+    const { data: students, error } = await query;
+    if (error) throw error;
+
+    // Helper to safely escape CSV fields according to RFC 4180
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return '""';
+      if (Array.isArray(val)) {
+        val = val.join('; ');
+      }
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const headers = [
+      'Full Name',
+      'First Name',
+      'Last Name',
+      'Matric No',
+      'Email',
+      'Phone',
+      'Department',
+      'Course',
+      'Current Level',
+      'Year of Study',
+      'Graduation Year',
+      'Status',
+      'Bio',
+      'Skills',
+      'Interests',
+      'LinkedIn',
+      'GitHub',
+      'Twitter',
+      'Instagram',
+      'Portfolio URL',
+      'Registration Date'
+    ];
+
+    const rows = (students || []).map(s => {
+      const levelInfo = calculateStudentLevel(s);
+      const computedLevel = s.current_level || levelInfo.current_level;
+      const levelText = computedLevel ? `${computedLevel} Level${levelInfo.is_graduated ? ' (Graduated)' : ''}` : 'Not Set';
+      const fullName = (s.name && s.name.trim()) || `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Student';
+      const createdDate = s.created_at ? new Date(s.created_at).toISOString().split('T')[0] : '';
+
+      return [
+        escapeCsv(fullName),
+        escapeCsv(s.first_name || ''),
+        escapeCsv(s.last_name || ''),
+        escapeCsv(s.matric_no || ''),
+        escapeCsv(s.email || ''),
+        escapeCsv(s.phone || ''),
+        escapeCsv(s.department || ''),
+        escapeCsv(s.course || ''),
+        escapeCsv(levelText),
+        escapeCsv(s.year_of_study || ''),
+        escapeCsv(s.graduation_year || ''),
+        escapeCsv(s.status || 'pending'),
+        escapeCsv(s.bio || ''),
+        escapeCsv(s.skills || []),
+        escapeCsv(s.interests || []),
+        escapeCsv(s.linkedin || ''),
+        escapeCsv(s.github || ''),
+        escapeCsv(s.twitter || ''),
+        escapeCsv(s.instagram || ''),
+        escapeCsv(s.portfolio_url || ''),
+        escapeCsv(createdDate)
+      ].join(',');
+    });
+
+    // Optional level filtering on calculated level if requested
+    let finalRows = rows;
+    if (year && parseInt(year, 10)) {
+      const targetLvl = `${parseInt(year, 10)} Level`;
+      finalRows = rows.filter(r => r.includes(`"${targetLvl}`));
+    }
+
+    // Prepend UTF-8 BOM (\uFEFF) so Excel on Windows properly displays characters
+    const csvContent = '\uFEFF' + [headers.map(h => `"${h}"`).join(','), ...finalRows].join('\r\n');
+    const dateStamp = new Date().toISOString().split('T')[0];
+    const filename = `nacos_students_directory_${dateStamp}.csv`;
+
+    await auditLog({
+      action: 'student_directory_exported_csv',
+      userId: req.userId,
+      details: { count: finalRows.length, filterStatus: status || 'all', department: department || 'all' },
+      ip: req.ip
+    });
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.status(200).send(csvContent);
+
+  } catch (error) {
+    console.error('CSV export error:', error);
+    return errorResponse(res, 'Failed to export students CSV', 500, error);
+  }
+});
+
+// ============================================
 // GET STUDENT DIRECTORY (Authenticated Students)
 // ============================================
 router.get('/directory', authenticate, directoryLimiter, async (req, res) => {

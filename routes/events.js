@@ -23,6 +23,19 @@ router.get('/upcoming', async (req, res) => {
 
     if (error) throw error;
 
+    // Sync current_attendees count on events table
+    try {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
+        .from('event_registrations')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', syncId);
+      if (typeof regCount === 'number') {
+        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
+      }
+    } catch (cntErr) {
+      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    }
+
     return successResponse(res, data || [], 'Upcoming events retrieved successfully');
   } catch (error) {
     console.error('Events fetch error:', error);
@@ -94,6 +107,19 @@ router.get('/past', async (req, res) => {
     const { data, error, count } = await query;
 
     if (error) throw error;
+
+    // Sync current_attendees count on events table
+    try {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
+        .from('event_registrations')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', syncId);
+      if (typeof regCount === 'number') {
+        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
+      }
+    } catch (cntErr) {
+      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    }
 
     // Calculate pagination metadata
     const totalPages = Math.ceil(count / parseInt(limit));
@@ -188,6 +214,19 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    // Sync current_attendees count on events table
+    try {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
+        .from('event_registrations')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', syncId);
+      if (typeof regCount === 'number') {
+        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
+      }
+    } catch (cntErr) {
+      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    }
 
     if (data) {
       triggerAutoContentBroadcast('events', data);
@@ -336,6 +375,19 @@ router.post('/:id/register', authenticate, async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    // Sync current_attendees count on events table
+    try {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
+        .from('event_registrations')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', syncId);
+      if (typeof regCount === 'number') {
+        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
+      }
+    } catch (cntErr) {
+      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    }
 
     return successResponse(res, { registration: data }, 'Successfully registered for event');
 
