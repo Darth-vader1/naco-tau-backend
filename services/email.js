@@ -716,9 +716,9 @@ function getEmailTemplate(type, data = {}) {
 function triggerAutoContentBroadcast(contentType, itemData, options = {}) {
     if (!itemData || typeof itemData !== 'object') return;
 
-    // Do not notify for unpublished or explicitly inactive items
-    if (itemData.is_published === false || itemData.is_active === false) {
-        console.log(`[AutoBroadcast] Skipped broadcast for inactive/unpublished item in ${contentType}`);
+    // Do not notify for unpublished, explicitly inactive items, or when send_email is toggled off
+    if (itemData.is_published === false || itemData.is_active === false || itemData.send_email === false || options.sendEmail === false || options.send_email === false) {
+        console.log(`[AutoBroadcast] Skipped broadcast for inactive/unpublished item or email toggle off in ${contentType}`);
         return;
     }
 

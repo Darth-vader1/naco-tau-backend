@@ -152,6 +152,11 @@ router.post('/:table', validateBodyIsObject, async (req, res) => {
     if (shapeErr) return res.status(400).json({ error: shapeErr });
 
     let insertBody = { ...req.body };
+    let shouldSendEmail = true;
+    if (insertBody.send_email !== undefined) {
+      shouldSendEmail = insertBody.send_email === true || insertBody.send_email === 'true';
+      delete insertBody.send_email;
+    }
     let { data, error } = await supabase
       .from(req.adminTable)
       .insert(insertBody)
@@ -205,9 +210,11 @@ router.post('/:table', validateBodyIsObject, async (req, res) => {
       });
     }
 
-    // Automatically broadcast notification email to all active students
-    if (data) {
+    // Automatically broadcast notification email to all active students (if send_email is enabled)
+    if (data && shouldSendEmail) {
       triggerAutoContentBroadcast(req.adminTable, data);
+    } else if (data && !shouldSendEmail) {
+      console.log(`[admin/POST ${req.adminTable}] Skipped email broadcast because send_email is false`);
     }
 
     return res.json({ success: true, data: data || null, count: data ? 1 : 0 });
