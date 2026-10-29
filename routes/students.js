@@ -7,6 +7,7 @@ const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { studentValidationChains, idParam, paginationQuery, validate } = require('../middleware/validation');
 const { instances: { directoryLimiter, profileViewLimiter, profileUpdateLimiter } } = require('../middleware/rateLimitInstances');
+const { checkAndSendProfileReminders } = require('../services/email');
 
 /**
  * Permanently (HARD) delete a Supabase Auth user. Mirrors the helper in
@@ -651,6 +652,69 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Student deletion error:', error);
     return errorResponse(res, 'Failed to delete student', 500, error);
+  }
+});
+
+// ============================================
+// PROFILE UPDATE REMINDERS (Admin & Automated Cron)
+// ============================================
+
+/**
+ * Preview students eligible for profile update reminders
+ */
+router.get('/profile-reminders/preview', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await checkAndSendProfileReminders({ dryRun: true });
+    return successResponse(res, result, 'Profile reminder preview generated');
+  } catch (err) {
+    console.error('Reminder preview error:', err);
+    return errorResponse(res, 'Failed to generate reminder preview', 500, err);
+  }
+});
+
+/**
+ * Trigger sending profile update reminders (Admin)
+ */
+router.post('/profile-reminders/send', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 50, 1), 200);
+    const result = await checkAndSendProfileReminders({ dryRun: false, limit });
+
+    await auditLog({
+      action: 'profile_reminders_triggered',
+      userId: req.userId,
+      details: result,
+      ip: req.ip
+    });
+
+    return successResponse(res, result, 'Profile update reminders processed successfully');
+  } catch (err) {
+    console.error('Trigger reminder error:', err);
+    return errorResponse(res, 'Failed to send profile reminders', 500, err);
+  }
+});
+
+/**
+ * Webhook / Cron trigger for external schedulers
+ * Protected by CRON_SECRET or ADMIN_API_KEY
+ */
+router.all('/profile-reminders/cron', async (req, res) => {
+  try {
+    const secret = req.headers['x-cron-secret'] || req.query.secret || req.headers.authorization?.replace(/^Bearer\s+/i, '');
+    const validSecret = process.env.CRON_SECRET || process.env.ADMIN_API_KEY;
+
+    // Enforce secret if configured in environment
+    if (validSecret && secret !== validSecret) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Invalid cron secret' });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit || req.body?.limit, 10) || 50, 1), 100);
+    const result = await checkAndSendProfileReminders({ dryRun: false, limit });
+
+    return res.status(200).json({ success: true, result, timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error('Cron reminder error:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

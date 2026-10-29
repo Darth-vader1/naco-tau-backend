@@ -31,6 +31,7 @@ const {
 const { auditMiddleware } = require('./middleware/audit');
 const { sanitizeRequestBody } = require('./utils/validators');
 const { trackSession, initializeSessionManager } = require('./middleware/sessionManager');
+const { checkAndSendProfileReminders } = require('./services/email');
 
 // ---- Route modules ---------------------------------------------------------
 // Loaded after middleware & helpers because some routes require() them
@@ -439,6 +440,24 @@ if (!process.env.VERCEL) {
     
     // Initialize session manager (starts background cleanup)
     initializeSessionManager();
+
+    // Schedule automated profile update reminder check (runs daily on long-lived server)
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    setTimeout(() => {
+      logger.info('⏰ Running initial automated profile update reminder check...');
+      checkAndSendProfileReminders({ dryRun: false, limit: 50 }).catch(err => {
+        logger.error('[ProfileReminder Scheduler] Error in initial run:', { error: err.message });
+      });
+
+      const reminderInterval = setInterval(() => {
+        logger.info('⏰ Running scheduled 24h profile update reminder check...');
+        checkAndSendProfileReminders({ dryRun: false, limit: 50 }).catch(err => {
+          logger.error('[ProfileReminder Scheduler] Error in scheduled run:', { error: err.message });
+        });
+      }, TWENTY_FOUR_HOURS);
+
+      if (reminderInterval && reminderInterval.unref) reminderInterval.unref();
+    }, 5 * 60 * 1000); // Wait 5 minutes after boot before running
   });
 
   // ============================================

@@ -1052,6 +1052,217 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
 }
 
 // ============================================
+// ============================================
+// SEND PROFILE UPDATE REMINDER EMAIL
+// ============================================
+async function sendProfileUpdateReminderEmail({ student, missingFields = [] }) {
+    if (!student || !student.email) return;
+    try {
+        const firstName = student.first_name || (student.name ? student.name.split(' ')[0] : 'Student');
+        const matricNo = student.matric_no || 'N/A';
+        const department = student.department || 'Computing Sciences';
+        const dashboardUrl = `${FRONTEND_URL}/student-dashboard.html`;
+
+        const missingListHtml = missingFields.map(f => {
+            const icons = {
+                'Profile Picture': '📷',
+                'Bio / About Me': '📝',
+                'Technical Skills': '🛠️',
+                'Interests': '💡',
+                'Phone Number': '📱',
+                'LinkedIn or GitHub': '🔗'
+            };
+            const icon = icons[f] || '✨';
+            return `<li style="margin-bottom: 6px;"><strong>${icon} ${f}</strong></li>`;
+        }).join('');
+
+        const metaRows = [
+            { label: 'Student Name', value: `<strong>${student.name || firstName}</strong>` },
+            { label: 'Matric No', value: `<code>${matricNo}</code>` },
+            { label: 'Department', value: department },
+            { label: 'Directory Status', value: `<span class="badge badge-alert">⚠️ Incomplete Profile</span>` }
+        ];
+
+        const extraHtml = `
+            <div style="background: #fffbeb; border: 1px solid #fef3c7; border-left: 4px solid #f59e0b; border-radius: 8px; padding: 16px 18px; margin: 18px 0;">
+                <p style="margin: 0 0 8px; font-weight: 700; color: #92400e; font-size: 15px;">
+                    👋 Complete your profile to stand out in the NACOS community!
+                </p>
+                <p style="margin: 0; font-size: 13.5px; color: #78350f; line-height: 1.6;">
+                    We noticed that your NACOS TAU student profile is missing a few key details. Adding your skills, bio, and photo helps fellow computing students and project leads connect with you in the <strong>Student Networking Directory</strong>.
+                </p>
+            </div>
+
+            ${missingFields.length > 0 ? `
+            <p style="font-size: 14px; font-weight: 600; color: #334155; margin: 16px 0 6px;">Here is what's currently missing on your profile:</p>
+            <ul style="font-size: 13.5px; color: #475569; padding-left: 20px; line-height: 1.8; margin: 0 0 20px;">
+                ${missingListHtml}
+            </ul>
+            ` : ''}
+
+            <div style="background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 8px; padding: 14px 18px; margin: 16px 0;">
+                <p style="margin: 0 0 6px; font-size: 13.5px; font-weight: 600; color: #1e293b;">Why complete your profile?</p>
+                <ul style="margin: 0; padding-left: 18px; font-size: 13px; color: #64748b; line-height: 1.7;">
+                    <li>🤝 <strong>Get Discovered:</strong> Form hackathon teams and study groups through the directory.</li>
+                    <li>💼 <strong>Career Visibility:</strong> Tech recruiters and chapter executives scout talent from active profiles.</li>
+                    <li>🎫 <strong>Fast-Track Event Access:</strong> Verified details enable instant 1-click tickets and certificate generation.</li>
+                </ul>
+            </div>
+        `;
+
+        const html = renderBaseLayout({
+            headerBadge: 'Action Recommended',
+            headerTitle: '⚡ Complete Your Student Profile',
+            headerSubtitle: 'Stand out and get discovered across NACOS TAU',
+            contentTitle: `Hi ${firstName}, take 2 minutes to finish your profile`,
+            metaRows,
+            extraHtml,
+            buttonText: 'Update My Profile Now',
+            buttonUrl: dashboardUrl,
+            noticeText: 'Need help? Contact the NACOS team at nacos@tau.edu.ng or update directly on the portal.'
+        });
+
+        return await sendEmail({
+            to: student.email,
+            subject: `⚡ Complete your NACOS student profile to stand out, ${firstName}!`,
+            html,
+            text: `Hi ${firstName},\n\nYour NACOS TAU student profile is incomplete! Complete your profile so other students and recruiters can find you in the student directory.\n\nMissing details: ${missingFields.join(', ')}\n\nUpdate your profile here: ${dashboardUrl}\n\nNACOS TAU Chapter`
+        });
+    } catch (err) {
+        console.error('[sendProfileUpdateReminderEmail] Error:', err.message);
+    }
+}
+
+// ============================================
+// AUTOMATIC SCANNER & DISPATCHER
+// ============================================
+async function checkAndSendProfileReminders({ dryRun = false, limit = 50 } = {}) {
+    try {
+        console.log(`[ProfileReminder] Starting profile reminder scan (dryRun=${dryRun})...`);
+
+        // 1. Fetch all active students
+        const { data: students, error: fetchErr } = await supabase
+            .from('students')
+            .select('id, user_id, email, name, first_name, last_name, matric_no, department, bio, skills, interests, phone, profile_picture_url, linkedin, github, created_at, updated_at')
+            .eq('status', 'active')
+            .order('created_at', { ascending: false });
+
+        if (fetchErr) {
+            console.error('[ProfileReminder] Error fetching students:', fetchErr);
+            return { success: false, error: fetchErr.message };
+        }
+
+        if (!students || students.length === 0) {
+            console.log('[ProfileReminder] No active students found eligible for scan');
+            return { success: true, processed: 0, sent: 0, skipped: 0 };
+        }
+
+        // 2. Load recent reminder audit logs to enforce cooldown (44h for Mon/Wed/Fri schedule)
+        const cooldownHours = 44;
+        const cooldownThresholdIso = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
+        const { data: recentLogs } = await supabase
+            .from('audit_logs')
+            .select('user_id, timestamp')
+            .eq('action', 'profile_reminder_email_sent')
+            .gte('timestamp', cooldownThresholdIso);
+
+        const recentlyRemindedUserIds = new Set((recentLogs || []).map(l => l.user_id).filter(Boolean));
+
+        // 3. Inspect each student for missing fields
+        const candidates = [];
+        for (const s of students) {
+            if (!s.email || recentlyRemindedUserIds.has(s.user_id)) {
+                continue;
+            }
+
+            const missing = [];
+            const hasBio = s.bio && String(s.bio).trim().length >= 10;
+            const hasSkills = Array.isArray(s.skills) && s.skills.length > 0;
+            const hasPfp = s.profile_picture_url && !s.profile_picture_url.includes('tau_logo');
+            const hasPhone = s.phone && String(s.phone).trim().length >= 8;
+            const hasSocial = Boolean(s.linkedin || s.github);
+
+            if (!hasPfp) missing.push('Profile Picture');
+            if (!hasBio) missing.push('Bio / About Me');
+            if (!hasSkills) missing.push('Technical Skills');
+            if (!hasSocial) missing.push('LinkedIn or GitHub');
+            if (!hasPhone) missing.push('Phone Number');
+
+            // Incomplete if 2 or more important items are missing
+            if (missing.length >= 2) {
+                candidates.push({ student: s, missing });
+            }
+        }
+
+        console.log(`[ProfileReminder] Found ${candidates.length} students with incomplete profiles eligible for reminder`);
+
+        if (dryRun) {
+            return {
+                success: true,
+                dryRun: true,
+                totalActive: students.length,
+                eligibleCount: candidates.length,
+                candidates: candidates.slice(0, 15).map(c => ({
+                    email: c.student.email,
+                    name: c.student.name || c.student.first_name,
+                    matricNo: c.student.matric_no,
+                    missing: c.missing
+                }))
+            };
+        }
+
+        let sentCount = 0;
+        let errorCount = 0;
+        const toProcess = candidates.slice(0, limit);
+
+        for (let i = 0; i < toProcess.length; i++) {
+            const { student, missing } = toProcess[i];
+            try {
+                const res = await sendProfileUpdateReminderEmail({ student, missingFields: missing });
+                if (res && res.success !== false) {
+                    sentCount++;
+                    // Log in audit_logs so 7-day cooldown is recorded
+                    await supabase.from('audit_logs').insert([{
+                        action: 'profile_reminder_email_sent',
+                        user_id: student.user_id || null,
+                        user_email: student.email,
+                        details: {
+                            missing_fields: missing,
+                            student_id: student.id,
+                            matric_no: student.matric_no
+                        },
+                        timestamp: new Date().toISOString()
+                    }]);
+                } else {
+                    errorCount++;
+                }
+
+                // Friendly 1.5-second pacing to stay within rate limits
+                if (i < toProcess.length - 1) {
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+            } catch (sendErr) {
+                console.error(`[ProfileReminder] Error sending to ${student.email}:`, sendErr.message);
+                errorCount++;
+            }
+        }
+
+        console.log(`[ProfileReminder] Run complete: ${sentCount} reminders sent, ${errorCount} errors`);
+
+        return {
+            success: true,
+            totalScanned: students.length,
+            eligibleTotal: candidates.length,
+            sentCount,
+            errorCount
+        };
+
+    } catch (err) {
+        console.error('[ProfileReminder] Execution error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
 // EXPORT
 // ============================================
 module.exports = {
@@ -1067,5 +1278,7 @@ module.exports = {
     triggerAutoContentBroadcast,
     normalizeLevel,
     normalizeDepartment,
-    matchesTargetFilter
+    matchesTargetFilter,
+    sendProfileUpdateReminderEmail,
+    checkAndSendProfileReminders
 };
