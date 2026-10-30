@@ -106,23 +106,35 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
         if (act === 'student_registration' || act === 'welcome_email_sent') {
             const email = l.user_email || l.details?.email || 'New student';
             const name = `${l.details?.firstName || ''} ${l.details?.lastName || ''}`.trim() || l.details?.name || 'Student';
-            const matric = l.details?.matricNo || l.details?.matric_no || 'N/A';
+            const matric = l.details?.matricNo || l.details?.matric_no || null;
             events.push({
                 id: l.id,
                 action: act,
                 category: 'sign_up',
-                categoryLabel: '👤 Sign-Up & Welcome',
+                categoryLabel: '👤 Welcome & Sign-Up',
                 subject: `🎉 Welcome to NACOS TAU, ${name}! Your account is active`,
                 recipient: email,
                 recipientEmail: email,
+                matricNo: matric,
                 sentCount: 1,
                 errorCount: 0,
                 status: 'delivered',
                 timestamp: l.timestamp,
                 source: 'audit_log',
-                details: `Matric: ${matric} | Dept: ${l.details?.department || 'N/A'}`
+                details: 'Account activated for new student member'
             });
         } else if (act === 'profile_reminder_email_sent') {
+            let rawDetails = {};
+            if (typeof l.details === 'object' && l.details) {
+                rawDetails = l.details;
+            } else if (typeof l.details === 'string') {
+                try { rawDetails = JSON.parse(l.details); } catch(_) {}
+            }
+            const matric = rawDetails.matric_no || l.details?.matric_no || null;
+            const missingList = Array.isArray(rawDetails.missing_fields)
+                ? rawDetails.missing_fields
+                : (typeof rawDetails.missing_fields === 'string' ? [rawDetails.missing_fields] : []);
+
             events.push({
                 id: l.id,
                 action: act,
@@ -131,12 +143,14 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
                 subject: 'Complete Your NACOS TAU Student Profile',
                 recipient: l.user_email || 'Student',
                 recipientEmail: l.user_email,
+                matricNo: matric,
+                missingFields: missingList,
                 sentCount: 1,
                 errorCount: 0,
                 status: 'delivered',
                 timestamp: l.timestamp,
                 source: 'audit_log',
-                details: l.details ? (typeof l.details === 'object' ? JSON.stringify(l.details) : String(l.details)) : ''
+                details: missingList.length > 0 ? `Missing: ${missingList.join(', ')}` : 'Profile completion reminder'
             });
         } else if (act === 'admin_test_email_sent') {
             events.push({
