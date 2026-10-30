@@ -68,7 +68,7 @@ function scanForMaliciousContent(buffer, filename, ip) {
   
   // Check 6: Suspicious extensions in filename
   const suspiciousExtensions = ['.exe', '.bat', '.cmd', '.sh', '.ps1', '.vbs', '.jar', '.class'];
-  const hassSuspiciousExt = suspiciousExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+  const hasSuspiciousExt = suspiciousExtensions.some(ext => filename.toLowerCase().endsWith(ext));
   if (hasSuspiciousExt) {
     checks.push({ passed: false, reason: 'Suspicious file extension' });
   }

@@ -372,11 +372,25 @@ CREATE POLICY "voting_candidates_select_public" ON voting_candidates FOR SELECT 
 
 -- Votes: read/write own (one per position enforced by DB UNIQUE constraint)
 CREATE POLICY "votes_select_own" ON votes FOR SELECT USING (auth.uid() = voter_id);
-CREATE POLICY "votes_insert_own" ON votes FOR INSERT WITH CHECK (auth.uid() = voter_id);
+CREATE POLICY "votes_insert_own" ON votes FOR INSERT WITH CHECK (
+  auth.uid() = voter_id AND
+  EXISTS (
+    SELECT 1 FROM voting_positions vp
+    WHERE vp.id = votes.position_id
+      AND vp.is_active = true
+      AND (vp.voting_start IS NULL OR NOW() >= vp.voting_start)
+      AND (vp.voting_end IS NULL OR NOW() <= vp.voting_end)
+  )
+);
 
 -- Payments: read/write own
 CREATE POLICY "payments_select_own" ON payments FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "payments_insert_own" ON payments FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "payments_insert_own" ON payments FOR INSERT WITH CHECK (
+  auth.uid() = user_id 
+  AND (status IS NULL OR status = 'pending')
+  AND verified_at IS NULL 
+  AND verified_by IS NULL
+);
 
 -- Login history: read own only
 CREATE POLICY "login_history_select_own" ON login_history FOR SELECT USING (auth.uid() = user_id);

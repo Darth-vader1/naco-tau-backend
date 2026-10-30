@@ -37,7 +37,12 @@ async function seedAdmin() {
       }
 
       // Create or locate auth user
-      const password = process.env.ADMIN_PASSWORD || 'NacosAdmin2024!';
+      const password = process.env.ADMIN_PASSWORD;
+      if (!password || password.trim().length < 12) {
+        console.error('❌ FATAL: ADMIN_PASSWORD environment variable is required and must be at least 12 characters.');
+        console.error('   Please set ADMIN_PASSWORD before running this seed script.');
+        process.exit(1);
+      }
       const { data: authUser, error: authError } = await supabase.auth.signUp({
         email: email,
         password: password,
@@ -105,7 +110,7 @@ async function seedAdmin() {
     }
     console.log(
       '🔑 Password (ADMIN_PASSWORD env):',
-      process.env.ADMIN_PASSWORD || 'NacosAdmin2024!'
+      '[CONFIGURED VIA ADMIN_PASSWORD ENV]'
     );
     console.log('========================================');
   } catch (error) {

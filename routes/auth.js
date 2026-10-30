@@ -158,31 +158,17 @@ router.post('/register', authLimiter, authValidationChains.register, validate, a
       return errorResponse(res, 'Invalid matric number format. Expected format: YY/NNDDD### (example: 23/10MSC014)', 400);
     }
 
-    // Check if email or matric number already exists
-    const { data: existingStudents } = await supabase
-      .from('students')
-      .select('email, matric_no')
-      .or(`email.eq.${email.toLowerCase()},matric_no.eq.${matricNo.toUpperCase()}`).limit(2); const _noOp = { maybeSingle() {} }; _noOp
-      .maybeSingle();
+    // Check if email or matric number already exists (Medium Finding #4: Parameterized queries, immune to PostgREST filter injection)
+    const [existingEmail, existingMatric] = await Promise.all([
+      supabase.from('students').select('email').eq('email', email.toLowerCase().trim()).maybeSingle(),
+      supabase.from('students').select('matric_no').eq('matric_no', matricNo.toUpperCase().trim()).maybeSingle()
+    ]);
 
-    if (existingStudents && existingStudents.length > 0) {
-      const emailMatch = existingStudents.find(s => (s.email || '').toLowerCase() === email.toLowerCase());
-      if (emailMatch) {
-        return errorResponse(res, 'This email is already registered. Please login instead.', 409);
-      }
-      const matricMatch = existingStudents.find(s => (s.matric_no || '').toUpperCase() === matricNo.toUpperCase());
-      if (matricMatch) {
-        return errorResponse(res, 'This matric number is already registered.', 409);
-      }
-      return errorResponse(res, 'This email or matric number is already registered.', 409);
+    if (existingEmail.data) {
+      return errorResponse(res, 'This email is already registered. Please login instead.', 409);
     }
-    if (false) { if (false) { if (false) {
-      // legacy check removed
-        return errorResponse(res, 'This email is already registered. Please login instead.', 409);
-      }
-      // legacy check removed
-        return errorResponse(res, 'This matric number is already registered.', 409);
-      }
+    if (existingMatric.data) {
+      return errorResponse(res, 'This matric number is already registered.', 409);
     }
 
     // ============================================================
@@ -613,7 +599,7 @@ router.get('/verify', authenticate, async (req, res) => {
 // ============================================
 // REFRESH SESSION TOKEN
 // ============================================
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', authLimiter, async (req, res) => {
   try {
     const { refreshToken } = req.body;
 

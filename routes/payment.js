@@ -17,6 +17,10 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
     if (!bachsSecret || bachsSecret.includes('placeholder')) {
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[Bachs] BACHS_SECRET_KEY is missing/placeholder in production environment.');
+        return errorResponse(res, 'Payment gateway configuration error. Please contact administrator.', 503);
+      }
       console.warn('[Bachs] BACHS_SECRET_KEY not configured in environment variables.');
       return successResponse(res, {
         checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
@@ -152,12 +156,12 @@ router.post('/submit', authenticate, async (req, res) => {
       return errorResponse(res, 'event_id is required for event_registration payments.', 400);
     }
 
-    // If event_id is provided, confirm the target event actually exists.
+    // If event_id is provided, confirm the target event actually exists and validate price.
     let resolvedEventId = null;
     if (event_id) {
       const { data: targetEvent, error: evErr } = await supabase
         .from('events')
-        .select('id')
+        .select('id, title, is_paid, payment_amount')
         .eq('id', event_id)
         .maybeSingle();
 
@@ -166,6 +170,14 @@ router.post('/submit', authenticate, async (req, res) => {
         return errorResponse(res, `Event ${event_id} does not exist.`, 400);
       }
       resolvedEventId = targetEvent.id;
+
+      // Medium Finding #3: Validate submitted amount against event payment_amount
+      if (targetEvent.is_paid && targetEvent.payment_amount) {
+        const requiredAmount = Number(targetEvent.payment_amount);
+        if (parsedAmount < requiredAmount) {
+          return errorResponse(res, `Submitted amount (₦${parsedAmount}) is less than the required fee (₦${requiredAmount}) for "${targetEvent.title}".`, 400);
+        }
+      }
     }
 
     const { data, error } = await supabase
@@ -447,6 +459,10 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
       }
     } else {
       // Mock / Dev Fallback when secret key is not yet set
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[Bachs] Live secret key missing in production verification attempt.');
+        return errorResponse(res, 'Payment gateway configuration error in production.', 500);
+      }
       console.warn(`[Bachs] BACHS_SECRET_KEY not set. Accepting test reference "${reference}" in dev mode.`);
       const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
       verifiedPaymentData = {
@@ -1033,7 +1049,35 @@ router.post('/webhook', async (req, res) => {
     event.data?.checkout_id;
 
   if (isBachsEvent) {
-    res.sendStatus(200); // Acknowledge Bachs immediately
+    // Critical Finding #1: Enforce signature / secret verification on Bachs webhook
+    const signature = req.headers['x-bachs-signature'] || req.headers['bachs-signature'] || req.headers['x-signature'];
+    const webhookToken = req.headers['x-webhook-token'] || req.headers['x-webhook-secret'] || req.query.secret;
+
+    let isAuthorized = false;
+    if (bachsSecret) {
+      if (signature) {
+        const payloadString = req.rawBody || JSON.stringify(req.body);
+        const expectedHmac256 = crypto.createHmac('sha256', bachsSecret).update(payloadString).digest('hex');
+        const expectedHmac512 = crypto.createHmac('sha512', bachsSecret).update(payloadString).digest('hex');
+        
+        try {
+          if (signature.length === expectedHmac256.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHmac256))) {
+            isAuthorized = true;
+          } else if (signature.length === expectedHmac512.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHmac512))) {
+            isAuthorized = true;
+          }
+        } catch (_) {}
+      } else if (webhookToken && webhookToken === bachsSecret) {
+        isAuthorized = true;
+      }
+    }
+
+    if (!isAuthorized) {
+      console.warn('[Bachs Webhook] ❌ Blocked unsigned or invalid Bachs webhook request');
+      return res.status(401).send('Unauthorized: Invalid or missing Bachs signature');
+    }
+
+    res.sendStatus(200); // Acknowledge verified Bachs webhook immediately
     try {
       const bData = event.data || event;
       const ref = bData.id || bData.checkout_id || bData.reference || bData.code;
@@ -1043,22 +1087,32 @@ router.post('/webhook', async (req, res) => {
         const rawAmt = bData.pricing?.amount || bData.amount || 0;
         const amt = parseFloat(rawAmt) || 0;
 
-        const { data: existing } = await supabase.from('payments').select('id, status').eq('transaction_id', ref).maybeSingle();
+        const { data: existing } = await supabase.from('payments').select('id, status, user_id').eq('transaction_id', ref).maybeSingle();
         if (existing && existing.status === 'verified') return;
+
+        // Medium Finding #6: Resolve student user_id to prevent orphan records
+        const customerEmail = bData.customer?.email || event.customer?.email || bData.metadata?.email;
+        let resolvedUserId = existing?.user_id || null;
+        if (!resolvedUserId && customerEmail) {
+          const { data: matchedStudent } = await supabase.from('students').select('user_id').eq('email', customerEmail.toLowerCase().trim()).maybeSingle();
+          if (matchedStudent) resolvedUserId = matchedStudent.user_id;
+        }
 
         let payId = existing?.id;
         if (!existing) {
           const { data: newP } = await supabase.from('payments').insert([{
+            user_id: resolvedUserId,
             amount: amt,
             transaction_id: ref,
             status: 'verified',
             verified_at: new Date().toISOString(),
             submitted_at: new Date().toISOString(),
-            notes: 'Verified via Bachs Webhook'
+            notes: resolvedUserId ? 'Verified via Bachs Webhook' : `Verified via Bachs Webhook (Unmatched email: ${customerEmail || 'unknown'})`
           }]).select().single();
           payId = newP?.id;
         } else {
           await supabase.from('payments').update({
+            user_id: resolvedUserId || existing.user_id,
             status: 'verified',
             verified_at: new Date().toISOString(),
             notes: 'Verified via Bachs Webhook'

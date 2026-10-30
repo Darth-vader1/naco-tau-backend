@@ -873,12 +873,30 @@ async function sendWelcomeEmail({ student }) {
             noticeText:  `Need help? Reach us at nacos@tau.edu.ng or visit <a href="${portalUrl}" style="color:#1b8c0c;">nacosportal.vercel.app</a>`
         });
 
-        return await sendEmail({
+        const emailRes = await sendEmail({
             to:      student.email,
             subject: `🎉 Welcome to NACOS TAU, ${firstName}! Your account is active`,
             html,
             text: `Hi ${firstName},\n\nWelcome to the Nigerian Association of Computing Students, Thomas Adewumi University Chapter!\n\nYour account is now active.\nMatric No: ${matricNo}\nDepartment: ${department}\n\nVisit your dashboard: ${dashboardUrl}\n\nNACOS TAU Chapter`
         });
+
+        try {
+            await supabase.from('audit_logs').insert({
+                action: 'welcome_email_sent',
+                user_id: student.user_id || null,
+                user_email: student.email,
+                details: {
+                    matric_no: matricNo,
+                    department: department,
+                    name: fullName
+                },
+                timestamp: new Date().toISOString()
+            });
+        } catch (auditErr) {
+            console.error('[sendWelcomeEmail] Failed to log audit:', auditErr.message);
+        }
+
+        return emailRes;
     } catch (err) {
         console.error('[sendWelcomeEmail] Failed to send welcome email:', err.message);
     }
@@ -981,12 +999,30 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             noticeText: 'Please keep this email for your records.'
         });
 
-        return await sendEmail({
+        const ticketRes = await sendEmail({
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
             text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
+
+        try {
+            await supabase.from('audit_logs').insert({
+                action: 'event_ticket_email_sent',
+                user_id: student.user_id || null,
+                user_email: student.email,
+                details: {
+                    ticket_number: ticketNumber,
+                    event_title: eventTitle,
+                    event_id: event.id || null
+                },
+                timestamp: new Date().toISOString()
+            });
+        } catch (auditErr) {
+            console.error('[sendEventTicketEmail] Failed to log audit:', auditErr.message);
+        }
+
+        return ticketRes;
     } catch (err) {
         console.error('Failed to send event ticket confirmation email:', err);
     }

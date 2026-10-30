@@ -26,8 +26,176 @@ function calculateNextCronRun() {
 }
 
 /**
+ * Helper to fetch and unify email dispatch events from notifications and audit_logs
+ */
+async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
+    // 1. Fetch from notifications table (bulk broadcasts, past questions, timetables, events, etc.)
+    let notifsQuery = supabase
+        .from('notifications')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+    if (startDateIso) {
+        notifsQuery = notifsQuery.gte('created_at', startDateIso);
+    }
+    const { data: notifs } = await notifsQuery;
+
+    // 2. Fetch from audit_logs (reminders, signups, tickets, tests)
+    let logsQuery = supabase
+        .from('audit_logs')
+        .select('*')
+        .or('action.ilike.%email%,action.ilike.%reminder%,action.eq.student_registration,action.eq.welcome_email_sent,action.eq.event_ticket_email_sent')
+        .order('timestamp', { ascending: false });
+
+    if (startDateIso) {
+        logsQuery = logsQuery.gte('timestamp', startDateIso);
+    }
+    const { data: logs } = await logsQuery;
+
+    const events = [];
+
+    (notifs || []).forEach(n => {
+        const subj = n.subject || 'Broadcast';
+        const subjLower = subj.toLowerCase();
+        let category = 'broadcast';
+        let categoryLabel = '📢 Broadcast';
+
+        if (subjLower.includes('past question')) {
+            category = 'past_question';
+            categoryLabel = '📚 Past Question';
+        } else if (subjLower.includes('timetable')) {
+            category = 'timetable_resource';
+            categoryLabel = '📅 Timetable';
+        } else if (subjLower.includes('resource') || subjLower.includes('academic resource')) {
+            category = 'timetable_resource';
+            categoryLabel = '📖 Academic Resource';
+        } else if (subjLower.includes('event')) {
+            category = 'event_hackathon';
+            categoryLabel = '🎉 Event';
+        } else if (subjLower.includes('hackathon')) {
+            category = 'event_hackathon';
+            categoryLabel = '🏆 Hackathon';
+        } else if (subjLower.includes('career')) {
+            category = 'broadcast';
+            categoryLabel = '🚀 Career Roadmap';
+        }
+
+        const successCount = n.success_count || 0;
+        const totalTarget = n.recipient_count || 0;
+        const isFailed = (n.error_count > 0 && successCount === 0);
+
+        events.push({
+            id: n.id,
+            action: `notification_${category}`,
+            category,
+            categoryLabel,
+            subject: subj,
+            recipient: `${successCount} / ${totalTarget} students`,
+            recipientEmail: null,
+            sentCount: successCount,
+            errorCount: n.error_count || 0,
+            status: isFailed ? 'failed' : 'delivered',
+            timestamp: n.created_at,
+            source: 'notification',
+            details: n.target_filter ? `Audience: ${typeof n.target_filter === 'object' ? JSON.stringify(n.target_filter) : n.target_filter}` : 'Audience: All active students'
+        });
+    });
+
+    (logs || []).forEach(l => {
+        const act = l.action || '';
+        if (act === 'student_registration' || act === 'welcome_email_sent') {
+            const email = l.user_email || l.details?.email || 'New student';
+            const name = `${l.details?.firstName || ''} ${l.details?.lastName || ''}`.trim() || l.details?.name || 'Student';
+            const matric = l.details?.matricNo || l.details?.matric_no || 'N/A';
+            events.push({
+                id: l.id,
+                action: act,
+                category: 'sign_up',
+                categoryLabel: '👤 Sign-Up & Welcome',
+                subject: `🎉 Welcome to NACOS TAU, ${name}! Your account is active`,
+                recipient: email,
+                recipientEmail: email,
+                sentCount: 1,
+                errorCount: 0,
+                status: 'delivered',
+                timestamp: l.timestamp,
+                source: 'audit_log',
+                details: `Matric: ${matric} | Dept: ${l.details?.department || 'N/A'}`
+            });
+        } else if (act === 'profile_reminder_email_sent') {
+            events.push({
+                id: l.id,
+                action: act,
+                category: 'profile_reminder',
+                categoryLabel: '⏰ Profile Reminder',
+                subject: 'Complete Your NACOS TAU Student Profile',
+                recipient: l.user_email || 'Student',
+                recipientEmail: l.user_email,
+                sentCount: 1,
+                errorCount: 0,
+                status: 'delivered',
+                timestamp: l.timestamp,
+                source: 'audit_log',
+                details: l.details ? (typeof l.details === 'object' ? JSON.stringify(l.details) : String(l.details)) : ''
+            });
+        } else if (act === 'admin_test_email_sent') {
+            events.push({
+                id: l.id,
+                action: act,
+                category: 'test_email',
+                categoryLabel: '🧪 Test Dispatch',
+                subject: 'Profile Reminder Email Test',
+                recipient: l.user_email || l.details?.target || 'Admin',
+                recipientEmail: l.user_email,
+                sentCount: 1,
+                errorCount: 0,
+                status: 'delivered',
+                timestamp: l.timestamp,
+                source: 'audit_log',
+                details: 'Admin test dispatch'
+            });
+        } else if (act === 'event_ticket_email_sent') {
+            events.push({
+                id: l.id,
+                action: act,
+                category: 'event_hackathon',
+                categoryLabel: '🎫 Event Ticket',
+                subject: `🎟️ Ticket Confirmed: ${l.details?.event_title || 'NACOS Event'}`,
+                recipient: l.user_email || 'Student',
+                recipientEmail: l.user_email,
+                sentCount: 1,
+                errorCount: 0,
+                status: 'delivered',
+                timestamp: l.timestamp,
+                source: 'audit_log',
+                details: `Ticket: ${l.details?.ticket_number || 'N/A'}`
+            });
+        } else if (act.toLowerCase().includes('failed') || act.toLowerCase().includes('error')) {
+            events.push({
+                id: l.id,
+                action: act,
+                category: 'failed',
+                categoryLabel: '❌ Delivery Error',
+                subject: l.details?.subject || 'Email Dispatch Failure',
+                recipient: l.user_email || 'Unknown',
+                recipientEmail: l.user_email,
+                sentCount: 0,
+                errorCount: 1,
+                status: 'failed',
+                timestamp: l.timestamp,
+                source: 'audit_log',
+                details: typeof l.details === 'object' ? JSON.stringify(l.details) : String(l.details || '')
+            });
+        }
+    });
+
+    events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return events;
+}
+
+/**
  * @route   GET /api/emails/analytics
- * @desc    Get aggregated stats, cron status, daily trends, and sender info
+ * @desc    Get aggregated stats, cron status, daily trends, and sender info across all email systems
  * @access  Private/Admin
  */
 router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
@@ -45,56 +213,55 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
             startDateIso = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
         }
 
-        // 1. Fetch relevant audit logs
-        let logsQuery = supabase
-            .from('audit_logs')
-            .select('id, action, user_id, user_email, details, timestamp')
-            .or('action.ilike.%email%,action.ilike.%reminder%')
-            .order('timestamp', { ascending: false });
+        // 1. Fetch unified email events
+        const events = await getUnifiedEmailEvents({ startDateIso });
 
-        if (startDateIso) {
-            logsQuery = logsQuery.gte('timestamp', startDateIso);
-        }
-
-        const { data: emailLogs, error: logErr } = await logsQuery.limit(2000);
-        if (logErr) throw logErr;
-
-        // 2. Count breakdown
+        let totalDelivered = 0;
+        let pastQuestions = 0;
+        let signUps = 0;
         let profileReminders = 0;
-        let broadcasts = 0;
-        let welcomeEmails = 0;
-        let ticketEmails = 0;
+        let timetablesResources = 0;
+        let eventsHackathons = 0;
+        let generalBroadcasts = 0;
         let failedEmails = 0;
-        let otherEmails = 0;
 
         const dailyMap = {};
-        (emailLogs || []).forEach(log => {
-            const act = (log.action || '').toLowerCase();
-            const isFailed = act.includes('failed') || act.includes('error');
-            if (isFailed) failedEmails++;
 
-            if (act === 'profile_reminder_email_sent') profileReminders++;
-            else if (act.includes('broadcast')) broadcasts++;
-            else if (act.includes('welcome')) welcomeEmails++;
-            else if (act.includes('ticket')) ticketEmails++;
-            else otherEmails++;
+        events.forEach(e => {
+            totalDelivered += e.sentCount;
+            failedEmails += e.errorCount;
 
-            const dateStr = log.timestamp ? log.timestamp.split('T')[0] : 'Unknown';
+            if (e.category === 'past_question') pastQuestions += e.sentCount;
+            else if (e.category === 'sign_up') signUps += e.sentCount;
+            else if (e.category === 'profile_reminder') profileReminders += e.sentCount;
+            else if (e.category === 'timetable_resource') timetablesResources += e.sentCount;
+            else if (e.category === 'event_hackathon') eventsHackathons += e.sentCount;
+            else if (e.category === 'broadcast') generalBroadcasts += e.sentCount;
+
+            const dateStr = e.timestamp ? e.timestamp.split('T')[0] : 'Unknown';
             if (!dailyMap[dateStr]) {
-                dailyMap[dateStr] = { date: dateStr, count: 0, reminders: 0, broadcasts: 0, others: 0 };
+                dailyMap[dateStr] = {
+                    date: dateStr,
+                    count: 0,
+                    pastQuestions: 0,
+                    signUps: 0,
+                    reminders: 0,
+                    broadcasts: 0
+                };
             }
-            dailyMap[dateStr].count++;
-            if (act === 'profile_reminder_email_sent') dailyMap[dateStr].reminders++;
-            else if (act.includes('broadcast')) dailyMap[dateStr].broadcasts++;
-            else dailyMap[dateStr].others++;
+            dailyMap[dateStr].count += e.sentCount;
+            if (e.category === 'past_question') dailyMap[dateStr].pastQuestions += e.sentCount;
+            else if (e.category === 'sign_up') dailyMap[dateStr].signUps += e.sentCount;
+            else if (e.category === 'profile_reminder') dailyMap[dateStr].reminders += e.sentCount;
+            else dailyMap[dateStr].broadcasts += e.sentCount;
         });
 
-        const totalSent = (emailLogs || []).length - failedEmails;
-        const successRate = (emailLogs || []).length > 0 
-            ? Math.round((totalSent / (emailLogs || []).length) * 100) 
+        const totalAttempts = totalDelivered + failedEmails;
+        const successRate = totalAttempts > 0 
+            ? Math.round((totalDelivered / totalAttempts) * 100) 
             : 100;
 
-        // 3. Active students profile status & cooldown
+        // 2. Active students profile status & cooldown
         const { data: students } = await supabase
             .from('students')
             .select('id, user_id, email, bio, skills, profile_picture_url, phone, linkedin, github')
@@ -151,10 +318,10 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
             }
         });
 
-        // 4. Calculate next cron run (Mon, Wed, Fri at 15:00 UTC = 16:00 WAT)
+        // 3. Calculate next cron run (Mon, Wed, Fri at 15:00 UTC = 16:00 WAT)
         const nextCron = calculateNextCronRun();
 
-        // 5. Daily activity sorted by date ascending for charts
+        // 4. Daily activity sorted by date ascending for charts
         const dailyActivity = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
 
         const oauthActive = Boolean(process.env.OAUTH_CLIENT_ID && process.env.OAUTH_CLIENT_SECRET && process.env.OAUTH_REFRESH_TOKEN);
@@ -162,14 +329,14 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
 
         return successResponse(res, {
             summary: {
-                totalLogged: (emailLogs || []).length,
-                totalSent: Math.max(totalSent, 0),
+                totalDelivered,
+                pastQuestions,
+                signUps,
                 profileReminders,
-                broadcasts,
-                welcomeEmails,
-                ticketEmails,
+                timetablesResources,
+                eventsHackathons,
+                broadcasts: generalBroadcasts + timetablesResources + eventsHackathons,
                 failedEmails,
-                otherEmails,
                 successRate
             },
             cronStatus: {
@@ -184,11 +351,10 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
                 readyToSend
             },
             typeDistribution: {
+                pastQuestions,
+                signUps,
                 profileReminders,
-                broadcasts,
-                welcomeEmails,
-                ticketEmails,
-                otherEmails
+                broadcasts: generalBroadcasts + timetablesResources + eventsHackathons
             },
             dailyActivity,
             sender: {
@@ -206,7 +372,7 @@ router.get('/analytics', authenticate, requireAdmin, async (req, res) => {
 
 /**
  * @route   GET /api/emails/logs
- * @desc    Get paginated email activity logs
+ * @desc    Get paginated email activity logs across past questions, sign-ups, reminders, and broadcasts
  * @access  Private/Admin
  */
 router.get('/logs', authenticate, requireAdmin, async (req, res) => {
@@ -216,39 +382,46 @@ router.get('/logs', authenticate, requireAdmin, async (req, res) => {
         const offset = (page - 1) * limit;
         const { type, search } = req.query;
 
-        let query = supabase
-            .from('audit_logs')
-            .select('*', { count: 'exact' })
-            .or('action.ilike.%email%,action.ilike.%reminder%')
-            .order('timestamp', { ascending: false });
+        // Fetch all unified events
+        let events = await getUnifiedEmailEvents();
 
+        // Filter by type
         if (type && type !== 'all') {
-            if (type === 'profile_reminder') {
-                query = query.eq('action', 'profile_reminder_email_sent');
+            if (type === 'past_question') {
+                events = events.filter(e => e.category === 'past_question');
+            } else if (type === 'sign_up') {
+                events = events.filter(e => e.category === 'sign_up');
+            } else if (type === 'profile_reminder') {
+                events = events.filter(e => e.category === 'profile_reminder');
             } else if (type === 'broadcast') {
-                query = query.ilike('action', '%broadcast%');
+                events = events.filter(e => e.category === 'broadcast' || e.category === 'timetable_resource' || e.category === 'event_hackathon');
             } else if (type === 'failed') {
-                query = query.ilike('action', '%failed%');
-            } else {
-                query = query.eq('action', type);
+                events = events.filter(e => e.status === 'failed');
             }
         }
 
+        // Filter by search term
         if (search && search.trim()) {
-            const s = search.trim();
-            query = query.or(`user_email.ilike.%${s}%,action.ilike.%${s}%`);
+            const s = search.trim().toLowerCase();
+            events = events.filter(e => 
+                (e.subject && e.subject.toLowerCase().includes(s)) ||
+                (e.recipient && e.recipient.toLowerCase().includes(s)) ||
+                (e.recipientEmail && e.recipientEmail.toLowerCase().includes(s)) ||
+                (e.categoryLabel && e.categoryLabel.toLowerCase().includes(s)) ||
+                (e.details && e.details.toLowerCase().includes(s))
+            );
         }
 
-        const { data, count, error } = await query.range(offset, offset + limit - 1);
-        if (error) throw error;
+        const total = events.length;
+        const paginated = events.slice(offset, offset + limit);
 
         return successResponse(res, {
-            logs: data || [],
+            logs: paginated,
             pagination: {
                 page,
                 limit,
-                total: count || 0,
-                totalPages: Math.ceil((count || 0) / limit)
+                total,
+                totalPages: Math.ceil(total / limit)
             }
         });
     } catch (err) {
@@ -257,11 +430,6 @@ router.get('/logs', authenticate, requireAdmin, async (req, res) => {
     }
 });
 
-/**
- * @route   POST /api/emails/test-send
- * @desc    Send a single live test email to verify credentials
- * @access  Private/Admin
- */
 router.post('/test-send', authenticate, requireAdmin, async (req, res) => {
     try {
         const { email } = req.body;
