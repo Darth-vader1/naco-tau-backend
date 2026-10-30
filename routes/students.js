@@ -44,9 +44,9 @@ const permanentlyDeleteAuthUser = async (userId) => {
  * Calculate dynamic student level and graduation status
  */
 const calculateStudentLevel = (student) => {
-  if (student && student.current_level) {
+  if (student && (student.current_level || student.level)) {
     return {
-      current_level: student.current_level,
+      current_level: student.current_level || student.level,
       is_graduated: Boolean(student.is_graduated)
     };
   }

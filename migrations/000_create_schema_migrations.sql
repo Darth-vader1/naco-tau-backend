@@ -49,5 +49,6 @@ INSERT INTO schema_migrations (filename, description) VALUES
   ('014_fix_level_display_issue',                 'Fix current_level display calculation in view'),
   ('015_fix_all_student_data_issues',             'Bulk fix student data quality issues'),
   ('016_fix_double_encoded_skills_interests',     'Fix double-encoded JSON in skills/interests arrays'),
-  ('017_add_payments_transaction_id_index',       'Index on payments.transaction_id for receipt lookups')
+  ('017_add_payments_transaction_id_index',       'Index on payments.transaction_id for receipt lookups'),
+  ('018_update_student_levels_from_bill_report',  'Update student academic levels based on Bill Report')
 ON CONFLICT (filename) DO NOTHING;
