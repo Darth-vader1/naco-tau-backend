@@ -838,8 +838,9 @@ router.all('/profile-reminders/cron', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Unauthorized: Invalid cron secret' });
     }
 
+    const isDryRun = req.query.dryRun === 'true' || req.query.dryrun === 'true' || req.body?.dryRun === true;
     const limit = Math.min(Math.max(parseInt(req.query.limit || req.body?.limit, 10) || 50, 1), 100);
-    const result = await checkAndSendProfileReminders({ dryRun: false, limit });
+    const result = await checkAndSendProfileReminders({ dryRun: isDryRun, limit });
 
     return res.status(200).json({ success: true, result, timestamp: new Date().toISOString() });
   } catch (err) {

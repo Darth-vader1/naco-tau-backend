@@ -1162,22 +1162,30 @@ async function checkAndSendProfileReminders({ dryRun = false, limit = 50 } = {})
         const cooldownThresholdIso = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
         const { data: recentLogs } = await supabase
             .from('audit_logs')
-            .select('user_id, timestamp')
+            .select('user_id, user_email, timestamp')
             .eq('action', 'profile_reminder_email_sent')
             .gte('timestamp', cooldownThresholdIso);
 
         const recentlyRemindedUserIds = new Set((recentLogs || []).map(l => l.user_id).filter(Boolean));
+        const recentlyRemindedEmails = new Set((recentLogs || []).map(l => (l.user_email || '').toLowerCase().trim()).filter(Boolean));
 
         // 3. Inspect each student for missing fields
         const candidates = [];
         for (const s of students) {
-            if (!s.email || recentlyRemindedUserIds.has(s.user_id)) {
+            const emailLower = (s.email || '').toLowerCase().trim();
+            if (!emailLower || (s.user_id && recentlyRemindedUserIds.has(s.user_id)) || recentlyRemindedEmails.has(emailLower)) {
                 continue;
             }
 
             const missing = [];
             const hasBio = s.bio && String(s.bio).trim().length >= 10;
-            const hasSkills = Array.isArray(s.skills) && s.skills.length > 0;
+            let skillsList = [];
+            if (Array.isArray(s.skills)) {
+                skillsList = s.skills;
+            } else if (typeof s.skills === 'string' && s.skills.trim()) {
+                try { skillsList = JSON.parse(s.skills); } catch (_) { skillsList = s.skills.split(',').map(x => x.trim()).filter(Boolean); }
+            }
+            const hasSkills = Array.isArray(skillsList) && skillsList.length > 0;
             const hasPfp = s.profile_picture_url && !s.profile_picture_url.includes('tau_logo');
             const hasPhone = s.phone && String(s.phone).trim().length >= 8;
             const hasSocial = Boolean(s.linkedin || s.github);
@@ -1221,25 +1229,28 @@ async function checkAndSendProfileReminders({ dryRun = false, limit = 50 } = {})
                 const res = await sendProfileUpdateReminderEmail({ student, missingFields: missing });
                 if (res && res.success !== false) {
                     sentCount++;
-                    // Log in audit_logs so 7-day cooldown is recorded
-                    await supabase.from('audit_logs').insert([{
-                        action: 'profile_reminder_email_sent',
-                        user_id: student.user_id || null,
-                        user_email: student.email,
-                        details: {
-                            missing_fields: missing,
-                            student_id: student.id,
-                            matric_no: student.matric_no
-                        },
-                        timestamp: new Date().toISOString()
-                    }]);
+                    try {
+                        await supabase.from('audit_logs').insert([{
+                            action: 'profile_reminder_email_sent',
+                            user_id: student.user_id || null,
+                            user_email: student.email,
+                            details: {
+                                missing_fields: missing,
+                                student_id: student.id,
+                                matric_no: student.matric_no
+                            },
+                            timestamp: new Date().toISOString()
+                        }]);
+                    } catch (auditErr) {
+                        console.warn('[ProfileReminder] Audit log warning:', auditErr?.message || auditErr);
+                    }
                 } else {
                     errorCount++;
                 }
 
-                // Friendly 1.5-second pacing to stay within rate limits
+                // Pacing (600ms) to stay within SMTP/API limits while fitting in serverless timeout
                 if (i < toProcess.length - 1) {
-                    await new Promise(r => setTimeout(r, 1500));
+                    await new Promise(r => setTimeout(r, 600));
                 }
             } catch (sendErr) {
                 console.error(`[ProfileReminder] Error sending to ${student.email}:`, sendErr.message);
