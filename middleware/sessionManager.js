@@ -87,7 +87,7 @@ class SessionMetadata {
  * Helper to get session from Redis or in-memory fallback
  */
 async function getStoredSession(userId) {
-  if (redisClient) {
+  if (redisClient && (redisClient.status === 'ready' || redisClient.status === 'connecting')) {
     try {
       const data = await redisClient.get(`session:${userId}`);
       if (data) {

@@ -1,5 +1,5 @@
 // utils/validators.js
-const sanitizeHtml = require('sanitize-html');
+// Zero-dependency parser-based HTML sanitization
 
 /**
  * Validate email format (TAU specific)
