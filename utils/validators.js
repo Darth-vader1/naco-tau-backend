@@ -1,4 +1,5 @@
 // utils/validators.js
+const sanitizeHtml = require('sanitize-html');
 
 /**
  * Validate email format (TAU specific)
@@ -195,11 +196,12 @@ function validatePrivacySettings(settings) {
 function sanitizeBio(bio) {
   if (!bio) return '';
   
-  // Remove HTML tags
-  let sanitized = bio.replace(/<[^>]*>/g, '');
-  
-  // Trim whitespace
-  sanitized = sanitized.trim();
+  // Real parser-based tag removal
+  let sanitized = sanitizeHtml(bio, {
+    allowedTags: [],
+    allowedAttributes: {},
+    disallowedTagsMode: 'discard'
+  }).trim();
   
   // Limit length
   if (sanitized.length > 500) {
@@ -290,16 +292,18 @@ function sanitizeRequestBody(req, res, next) {
  */
 function cleanString(str) {
   if (typeof str !== 'string') return str;
-  // Remove executable script tags, iframe, object, and embed tags
-  let cleaned = str.replace(/<\s*(script|iframe|object|embed|applet)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
-  // Remove standalone dangerous tags
-  cleaned = cleaned.replace(/<\s*(script|iframe|object|embed|applet)[^>]*>/gi, '');
-  // Remove javascript: pseudo-protocols
-  cleaned = cleaned.replace(/javascript\s*:/gi, '');
-  // Remove inline on* event handlers (e.g. onerror=, onclick=)
-  cleaned = cleaned.replace(/\s+on[a-zA-Z]+\s*=\s*(['"]).*?\1/gi, '');
-  cleaned = cleaned.replace(/\s+on[a-zA-Z]+\s*=\s*[^>\s]+/gi, '');
-  return cleaned.trim();
+  // Parser-based HTML sanitization stripping dangerous tags and handlers
+  return sanitizeHtml(str, {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1', 'h2', 'span', 'img']),
+    allowedAttributes: {
+      ...sanitizeHtml.defaults.allowedAttributes,
+      '*': ['class', 'style'],
+      a: ['href', 'name', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height']
+    },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    disallowedTagsMode: 'discard'
+  }).trim();
 }
 
 /**

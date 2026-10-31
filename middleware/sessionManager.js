@@ -3,6 +3,7 @@
 
 const { supabase } = require('../config/supabase');
 const { logger } = require('../config/logger');
+const { redisClient } = require('../config/redis');
 
 /**
  * Session configuration
@@ -19,8 +20,7 @@ const SESSION_CONFIG = {
 };
 
 /**
- * Session metadata store (in-memory)
- * In production, use Redis for distributed sessions
+ * Session metadata store (in-memory fallback when Redis is unavailable)
  */
 const sessionStore = new Map();
 
@@ -28,14 +28,14 @@ const sessionStore = new Map();
  * Session metadata structure
  */
 class SessionMetadata {
-  constructor(userId, userEmail) {
+  constructor(userId, userEmail, data = {}) {
     this.userId = userId;
     this.userEmail = userEmail;
-    this.createdAt = Date.now();
-    this.lastActivityAt = Date.now();
-    this.refreshCount = 0;
-    this.ipAddress = null;
-    this.userAgent = null;
+    this.createdAt = data.createdAt || Date.now();
+    this.lastActivityAt = data.lastActivityAt || Date.now();
+    this.refreshCount = data.refreshCount || 0;
+    this.ipAddress = data.ipAddress || null;
+    this.userAgent = data.userAgent || null;
   }
 
   updateActivity(ip, userAgent) {
@@ -63,6 +63,69 @@ class SessionMetadata {
 
   incrementRefresh() {
     this.refreshCount++;
+  }
+
+  toJSON() {
+    return {
+      userId: this.userId,
+      userEmail: this.userEmail,
+      createdAt: this.createdAt,
+      lastActivityAt: this.lastActivityAt,
+      refreshCount: this.refreshCount,
+      ipAddress: this.ipAddress,
+      userAgent: this.userAgent
+    };
+  }
+
+  static fromJSON(json) {
+    if (!json) return null;
+    return new SessionMetadata(json.userId, json.userEmail, json);
+  }
+}
+
+/**
+ * Helper to get session from Redis or in-memory fallback
+ */
+async function getStoredSession(userId) {
+  if (redisClient) {
+    try {
+      const data = await redisClient.get(`session:${userId}`);
+      if (data) {
+        return SessionMetadata.fromJSON(JSON.parse(data));
+      }
+    } catch (err) {
+      logger.warn('Redis get session error, falling back to memory:', err.message);
+    }
+  }
+  return sessionStore.get(userId) || null;
+}
+
+/**
+ * Helper to save session to Redis and memory
+ */
+async function saveStoredSession(session) {
+  sessionStore.set(session.userId, session);
+  if (redisClient) {
+    try {
+      const ttlSec = Math.max(1, Math.floor(SESSION_CONFIG.SESSION_TIMEOUT / 1000));
+      await redisClient.setex(`session:${session.userId}`, ttlSec, JSON.stringify(session.toJSON()));
+    } catch (err) {
+      logger.warn('Redis save session error:', err.message);
+    }
+  }
+}
+
+/**
+ * Helper to remove session from Redis and memory
+ */
+async function removeStoredSession(userId) {
+  sessionStore.delete(userId);
+  if (redisClient) {
+    try {
+      await redisClient.del(`session:${userId}`);
+    } catch (err) {
+      logger.warn('Redis delete session error:', err.message);
+    }
   }
 }
 
@@ -96,10 +159,10 @@ const trackSession = async (req, res, next) => {
     }
 
     // Get or create session metadata
-    let session = sessionStore.get(user.id);
+    let session = await getStoredSession(user.id);
     if (!session) {
       session = new SessionMetadata(user.id, user.email);
-      sessionStore.set(user.id, session);
+      await saveStoredSession(session);
       logger.info('Session created', { userId: user.id, email: user.email });
     }
 
@@ -108,7 +171,7 @@ const trackSession = async (req, res, next) => {
 
     // Check if session is expired
     if (session.isExpired()) {
-      sessionStore.delete(user.id);
+      await removeStoredSession(user.id);
       logger.warn('Session expired', { userId: user.id });
       return res.status(401).json({
         success: false,
@@ -117,6 +180,9 @@ const trackSession = async (req, res, next) => {
         timestamp: new Date().toISOString()
       });
     }
+
+    // Save updated activity back to Redis/Memory
+    await saveStoredSession(session);
 
     // Attach session info to request
     req.sessionMetadata = session;
@@ -162,40 +228,63 @@ const cleanupExpiredSessions = () => {
   for (const [userId, session] of sessionStore.entries()) {
     if (session.isExpired()) {
       sessionStore.delete(userId);
-      logger.info('Cleaned up expired session', { userId });
+      logger.info('Cleaned up expired session from memory', { userId });
     }
   }
   const after = sessionStore.size;
   if (before !== after) {
-    logger.info('Session cleanup complete', { removed: before - after, remaining: after });
+    logger.info('In-memory session cleanup complete', { removed: before - after, remaining: after });
   }
 };
 
 /**
  * Get session statistics (admin only)
  */
-const getSessionStats = () => {
+const getSessionStats = async () => {
   const now = Date.now();
-  const sessions = Array.from(sessionStore.values());
+  let sessions = Array.from(sessionStore.values());
+  let storage = 'memory';
+
+  if (redisClient) {
+    try {
+      const keys = await redisClient.keys('session:*');
+      storage = 'redis';
+      if (keys.length > 0) {
+        const pipeline = redisClient.pipeline();
+        keys.forEach(k => pipeline.get(k));
+        const results = await pipeline.exec();
+        const redisSessions = results
+          .map(([err, val]) => {
+            if (err || !val) return null;
+            try { return SessionMetadata.fromJSON(JSON.parse(val)); } catch (_) { return null; }
+          })
+          .filter(Boolean);
+        if (redisSessions.length > 0) {
+          sessions = redisSessions;
+        }
+      }
+    } catch (err) {
+      logger.warn('Error reading Redis session stats:', err.message);
+    }
+  }
   
   return {
     total: sessions.length,
     active: sessions.filter(s => (now - s.lastActivityAt) < 5 * 60 * 1000).length, // Active in last 5 min
     needsRefresh: sessions.filter(s => s.needsRefresh()).length,
     expired: sessions.filter(s => s.isExpired()).length,
-    avgRefreshCount: sessions.reduce((sum, s) => sum + s.refreshCount, 0) / sessions.length || 0
+    avgRefreshCount: sessions.length > 0 ? (sessions.reduce((sum, s) => sum + s.refreshCount, 0) / sessions.length) : 0,
+    storage
   };
 };
 
 /**
  * Invalidate specific user session (for logout/security)
  */
-const invalidateSession = (userId) => {
-  const deleted = sessionStore.delete(userId);
-  if (deleted) {
-    logger.info('Session invalidated', { userId });
-  }
-  return deleted;
+const invalidateSession = async (userId) => {
+  await removeStoredSession(userId);
+  logger.info('Session invalidated', { userId });
+  return true;
 };
 
 /**
@@ -217,7 +306,8 @@ const initializeSessionManager = () => {
   logger.info('✅ Session Manager initialized', {
     sessionTimeout: `${SESSION_CONFIG.SESSION_TIMEOUT / (60 * 60 * 1000)}h`,
     refreshThreshold: `${SESSION_CONFIG.REFRESH_THRESHOLD / (60 * 60 * 1000)}h`,
-    maxLifetime: `${SESSION_CONFIG.MAX_SESSION_LIFETIME / (24 * 60 * 60 * 1000)}d`
+    maxLifetime: `${SESSION_CONFIG.MAX_SESSION_LIFETIME / (24 * 60 * 60 * 1000)}d`,
+    storage: redisClient ? 'Redis (Upstash/Distributed)' : 'In-Memory Map'
   });
 };
 

@@ -191,11 +191,10 @@ const { extractToken } = require('./middleware/auth');
 const { initRateLimiters } = require('./middleware/rateLimitInstances');
 const crypto = require('crypto');
 
-// Redis for persistent rate limiting across deployments
-let Redis;
+// Redis for persistent rate limiting and session management across deployments
+const { redisClient } = require('./config/redis');
 let RedisStore;
 try {
-  Redis = require('ioredis');
   const rlr = require('rate-limit-redis');
   RedisStore = rlr.default || rlr;
 } catch (e) {
@@ -203,10 +202,7 @@ try {
 }
 
 let redisStore;
-if (process.env.REDIS_URL && RedisStore) {
-  const redisClient = new Redis(process.env.REDIS_URL);
-  redisClient.on('error', (err) => console.error('Redis Client Error', err));
-
+if (redisClient && RedisStore) {
   redisStore = new RedisStore({
     sendCommand: (...args) => redisClient.call(...args),
   });
