@@ -195,19 +195,10 @@ function validatePrivacySettings(settings) {
  */
 function sanitizeBio(bio) {
   if (!bio) return '';
-  
-  // Real parser-based tag removal
-  let sanitized = sanitizeHtml(bio, {
-    allowedTags: [],
-    allowedAttributes: {},
-    disallowedTagsMode: 'discard'
-  }).trim();
-  
-  // Limit length
+  let sanitized = parseAndSanitizeHtml(bio, { allowedTags: [] });
   if (sanitized.length > 500) {
     sanitized = sanitized.substring(0, 500);
   }
-  
   return sanitized;
 }
 
@@ -292,19 +283,137 @@ function sanitizeRequestBody(req, res, next) {
  */
 function cleanString(str) {
   if (typeof str !== 'string') return str;
-  // Parser-based HTML sanitization stripping dangerous tags and handlers
-  return sanitizeHtml(str, {
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1', 'h2', 'span', 'img']),
-    allowedAttributes: {
-      ...sanitizeHtml.defaults.allowedAttributes,
-      '*': ['class', 'style'],
-      a: ['href', 'name', 'target', 'rel'],
-      img: ['src', 'alt', 'title', 'width', 'height']
-    },
-    allowedSchemes: ['http', 'https', 'mailto'],
-    disallowedTagsMode: 'discard'
-  }).trim();
+  return parseAndSanitizeHtml(str);
 }
+
+/**
+ * Lexical state-machine HTML parser and sanitizer
+ * Strips dangerous executable tags (script, iframe, object, embed, style, meta, svg, etc.)
+ * Strips all inline event handlers (on*) and malicious pseudo-protocols (javascript:, vbscript:)
+ * CommonJS compatible across all Node.js runtimes without external ESM dependencies.
+ */
+function parseAndSanitizeHtml(input, options = {}) {
+  if (typeof input !== 'string') return '';
+  const allowedTags = options.allowedTags !== undefined ? new Set(options.allowedTags.map(t => t.toLowerCase())) : null;
+  const stripAllTags = allowedTags !== null && allowedTags.size === 0;
+
+  let output = '';
+  let i = 0;
+  const len = input.length;
+
+  while (i < len) {
+    if (input[i] === '<') {
+      let tagEnd = -1;
+      let inQuote = null;
+      for (let j = i + 1; j < len; j++) {
+        const char = input[j];
+        if (inQuote) {
+          if (char === inQuote) inQuote = null;
+        } else if (char === '"' || char === "'") {
+          inQuote = char;
+        } else if (char === '>') {
+          tagEnd = j;
+          break;
+        }
+      }
+
+      if (tagEnd === -1) {
+        output += input[i];
+        i++;
+        continue;
+      }
+
+      const rawTag = input.substring(i + 1, tagEnd).trim();
+      const isClosing = rawTag.startsWith('/');
+      const cleanTagContent = isClosing ? rawTag.substring(1).trim() : rawTag;
+      const tagMatch = cleanTagContent.match(/^([a-zA-Z][a-zA-Z0-9]*)/);
+
+      if (!tagMatch) {
+        output += input[i];
+        i++;
+        continue;
+      }
+
+      const tagName = tagMatch[1].toLowerCase();
+
+      // Disallow dangerous tags completely (and strip their inner contents if opening)
+      const dangerousTags = ['script', 'iframe', 'object', 'embed', 'applet', 'style', 'link', 'meta', 'base', 'svg', 'form', 'textarea'];
+      if (dangerousTags.includes(tagName)) {
+        if (!isClosing) {
+          const closePattern = new RegExp(`</\\s*${tagName}\\s*>`, 'i');
+          const rest = input.substring(tagEnd + 1);
+          const closeMatch = rest.match(closePattern);
+          if (closeMatch) {
+            i = tagEnd + 1 + closeMatch.index + closeMatch[0].length;
+            continue;
+          } else {
+            i = len;
+            break;
+          }
+        }
+        i = tagEnd + 1;
+        continue;
+      }
+
+      if (stripAllTags || (allowedTags && !allowedTags.has(tagName))) {
+        i = tagEnd + 1;
+        continue;
+      }
+
+      if (isClosing) {
+        output += `</${tagName}>`;
+      } else {
+        const attrString = cleanTagContent.substring(tagName.length);
+        const safeAttrs = sanitizeAttributes(tagName, attrString);
+        output += `<${tagName}${safeAttrs ? ' ' + safeAttrs : ''}>`;
+      }
+
+      i = tagEnd + 1;
+    } else {
+      output += input[i];
+      i++;
+    }
+  }
+
+  return output.trim();
+}
+
+function sanitizeAttributes(tagName, attrStr) {
+  if (!attrStr || !attrStr.trim()) return '';
+  const attrRegex = /([a-zA-Z0-9-]+)(?:\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+)))?/g;
+  let match;
+  const safe = [];
+
+  const allowedAttrs = {
+    '*': ['class', 'style', 'id', 'title'],
+    a: ['href', 'target', 'rel'],
+    img: ['src', 'alt', 'title', 'width', 'height']
+  };
+
+  while ((match = attrRegex.exec(attrStr)) !== null) {
+    const attrName = match[1].toLowerCase();
+    const attrVal = match[2] !== undefined ? match[2] : (match[3] !== undefined ? match[3] : (match[4] || ''));
+
+    if (attrName.startsWith('on')) continue;
+
+    if (attrName === 'href' || attrName === 'src') {
+      const lowerVal = attrVal.trim().toLowerCase();
+      if (lowerVal.startsWith('javascript:') || lowerVal.startsWith('vbscript:') || (lowerVal.startsWith('data:') && !lowerVal.startsWith('data:image/'))) {
+        continue;
+      }
+    }
+
+    const isGlobal = allowedAttrs['*'].includes(attrName);
+    const isTagSpecific = allowedAttrs[tagName] && allowedAttrs[tagName].includes(attrName);
+
+    if (isGlobal || isTagSpecific) {
+      safe.push(`${attrName}="${attrVal.replace(/"/g, '&quot;')}"`);
+    }
+  }
+
+  return safe.join(' ');
+}
+
 
 /**
  * Recursively sanitize an object
@@ -349,6 +458,8 @@ module.exports = {
   validateVisibility,
   validatePrivacySettings,
   sanitizeBio,
+  cleanString,
+  parseAndSanitizeHtml,
   sanitizeArray,
   applyPrivacySettings,
   sanitizeRequestBody
