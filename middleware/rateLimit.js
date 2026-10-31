@@ -24,7 +24,7 @@ const rateLimit = require('express-rate-limit');
 const baseConfig = {
   standardHeaders: true,   // Return RateLimit-* headers per RFC 6585
   legacyHeaders: false,     // Disable X-RateLimit-* legacy headers
-  validate: { trustProxy: false } // Trust proxy is configured at app level
+  validate: { trustProxy: false, unsharedStore: false } // Trust proxy is configured at app level
 };
 
 // Helper: get rate-limit key by authenticated user ID if present, else IP.

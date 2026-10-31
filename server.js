@@ -201,18 +201,22 @@ try {
   // If not installed yet, we'll fall back to memory
 }
 
-let redisStore;
-if (redisClient && RedisStore) {
-  redisStore = new RedisStore({
-    sendCommand: (...args) => redisClient.call(...args),
-  });
-  console.log('✅ Redis Rate Limiting Enabled');
-}
+const createRedisStore = (prefix) => {
+  if (redisClient && RedisStore) {
+    try {
+      return new RedisStore({
+        sendCommand: (...args) => redisClient.call(...args),
+        prefix: `rl:${prefix}:`
+      });
+    } catch (err) {
+      console.warn('⚠️ Could not initialize RedisStore for', prefix, err.message);
+    }
+  }
+  return undefined;
+};
 
-// Upgrade ALL route-level limiters (authLimiter, directoryLimiter, etc.)
-// to use the Redis store. Must be called before any request is handled.
-// If redisStore is undefined, limiters keep their in-memory fallback.
-initRateLimiters(redisStore);
+// Upgrade ALL route-level limiters with dedicated Redis store instances
+initRateLimiters(redisClient ? createRedisStore : undefined);
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -222,7 +226,7 @@ const globalLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore, // Uses Redis if configured, otherwise automatically falls back to Memory
+  store: createRedisStore('global'), // Uses Redis if configured, otherwise automatically falls back to Memory
   // Key on authenticated user token hash if present, fallback to client IP.
   // This prevents campus Wi-Fi (where hundreds of students share 1 IP) from triggering a mass block.
   keyGenerator: (req) => {
@@ -232,7 +236,7 @@ const globalLimiter = rateLimit({
     }
     return req.ip;
   },
-  validate: { trustProxy: false }
+  validate: { trustProxy: false, unsharedStore: false }
 });
 
 // Trust proxy (Railway / Cloudflare / Nginx) so rate limits key on the real client IP

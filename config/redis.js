@@ -1,5 +1,5 @@
 // config/redis.js
-// Shared Redis client configuration with graceful degradation
+// Shared Redis client configuration with graceful degradation and non-blocking lazy connection
 
 let Redis;
 try {
@@ -13,25 +13,26 @@ let redisClient = null;
 if (process.env.REDIS_URL && Redis) {
   try {
     redisClient = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 3,
-      enableReadyCheck: true,
-      lazyConnect: false,
-      connectTimeout: 5000,
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+      lazyConnect: true,
+      connectTimeout: 3000,
+      commandTimeout: 3000,
       retryStrategy(times) {
-        if (times > 5) {
-          console.warn('⚠️ Redis retry limit reached; disabling Redis client.');
-          return null; // Stop retrying
+        if (times > 2) {
+          return null; // Stop retrying on serverless cold starts
         }
-        return Math.min(times * 100, 2000);
+        return Math.min(times * 100, 1000);
       }
     });
 
     redisClient.on('error', (err) => {
-      console.warn('⚠️ Redis error:', err.message);
+      console.warn('⚠️ Redis connection error:', err.message);
     });
 
-    redisClient.on('connect', () => {
-      console.log('✅ Connected to Redis');
+    // Initiate non-blocking connection attempt in the background
+    redisClient.connect().catch((err) => {
+      console.warn('⚠️ Redis background connect failed, falling back:', err.message);
     });
   } catch (err) {
     console.warn('⚠️ Could not initialize Redis client:', err.message);

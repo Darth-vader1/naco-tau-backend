@@ -12,15 +12,14 @@
 // This module solves the bootstrapping problem with a two-phase init:
 //   Phase 1 (module load) — create in-memory fallback instances so routes
 //     can import real middleware references immediately.
-//   Phase 2 (server.js, after Redis is ready) — call initRateLimiters(store)
+//   Phase 2 (server.js, after Redis is ready) — call initRateLimiters(storeOrFactory)
 //     to replace every instance with a Redis-backed version. Because the
 //     exported object is mutated in place, all routes automatically use the
 //     upgraded limiters with zero re-import needed.
 //
 // USAGE in server.js:
 //   const { initRateLimiters } = require('./middleware/rateLimitInstances');
-//   // ... build redisStore ...
-//   initRateLimiters(redisStore);   // call BEFORE app.use() mounts routes
+//   initRateLimiters(createRedisStore);
 
 const {
   createAuthLimiter,
@@ -48,24 +47,24 @@ const instances = {
 /**
  * Phase 2 — called by server.js once the Redis store is ready.
  * Replaces every in-memory instance with a Redis-backed equivalent.
- * All existing references (route files) point at the same `instances`
- * object, so they pick up the new middleware automatically.
  *
- * @param {object|undefined} store - A rate-limit-redis store, or undefined to keep memory store.
+ * @param {Function|object|undefined} storeOrFactory - Store instance or (prefix) => Store
  */
-function initRateLimiters(store) {
-  if (!store) {
+function initRateLimiters(storeOrFactory) {
+  if (!storeOrFactory) {
     console.log('ℹ️  Rate limiting: Redis store not configured — using in-memory store (not suitable for multi-instance/serverless deployments)');
     return;
   }
-  instances.authLimiter          = createAuthLimiter(store);
-  instances.registrationLimiter  = createRegistrationLimiter(store);
-  instances.votingLimiter        = createVotingLimiter(store);
-  instances.uploadLimiter        = createUploadLimiter(store);
-  instances.apiLimiter           = createApiLimiter(store);
-  instances.directoryLimiter     = createDirectoryLimiter(store);
-  instances.profileViewLimiter   = createProfileViewLimiter(store);
-  instances.profileUpdateLimiter = createProfileUpdateLimiter(store);
+  const getStore = typeof storeOrFactory === 'function' ? storeOrFactory : () => storeOrFactory;
+
+  instances.authLimiter          = createAuthLimiter(getStore('auth'));
+  instances.registrationLimiter  = createRegistrationLimiter(getStore('reg'));
+  instances.votingLimiter        = createVotingLimiter(getStore('vote'));
+  instances.uploadLimiter        = createUploadLimiter(getStore('upload'));
+  instances.apiLimiter           = createApiLimiter(getStore('api'));
+  instances.directoryLimiter     = createDirectoryLimiter(getStore('dir'));
+  instances.profileViewLimiter   = createProfileViewLimiter(getStore('pview'));
+  instances.profileUpdateLimiter = createProfileUpdateLimiter(getStore('pupdate'));
   console.log('✅ Rate limiting: all limiters upgraded to Redis-backed store');
 }
 
