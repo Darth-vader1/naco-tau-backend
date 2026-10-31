@@ -29,6 +29,8 @@ const { ALLOWED_BUCKETS, BUCKETS, resolveBucketFor, isAllowedBucket } = require(
 // JSON snapshot (so auto-provisioned buckets match the dashboard settings).
 const DEFAULT_FILE_SIZE_LIMIT = 10 * 1024 * 1024;
 const PUBLIC_FLAG = true;
+// PII & sensitive financial document buckets provisioned as private (signed access only)
+const PRIVATE_BUCKETS = Object.freeze(['payment-proofs']);
 
 const DEFAULT_MIME_TYPES = Object.freeze([
   'image/*',
@@ -73,7 +75,7 @@ async function createBucketIfMissing(bucketName, existingMap) {
     return { bucketName, created: false, alreadyExisted: true };
   }
   const { data, error } = await supabase.storage.createBucket(bucketName, {
-    public: PUBLIC_FLAG,
+    public: PRIVATE_BUCKETS.includes(bucketName) ? false : PUBLIC_FLAG,
     fileSizeLimit: DEFAULT_FILE_SIZE_LIMIT,
     allowedMimeTypes: DEFAULT_MIME_TYPES
   });

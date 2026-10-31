@@ -25,6 +25,26 @@ function calculateNextCronRun() {
     return candidate;
 }
 
+function formatTargetAudience(raw) {
+    if (!raw || raw === 'all') return 'All Active Students';
+    let obj = raw;
+    if (typeof raw === 'string') {
+        try { obj = JSON.parse(raw); } catch (_) { return raw; }
+    }
+    const list = obj.audiences || obj.combos || obj.targetCombos || [];
+    if (Array.isArray(list) && list.length > 0) {
+        return list.map(item => {
+            const lvl = item.level ? `${item.level} Level` : '';
+            const dept = item.department || '';
+            if (lvl && dept) return `${lvl} • ${dept}`;
+            if (lvl) return `${lvl} (All Departments)`;
+            if (dept) return dept;
+            return 'All Students';
+        }).join(', ');
+    }
+    return typeof obj === 'string' ? obj : 'All Active Students';
+}
+
 /**
  * Helper to fetch and unify email dispatch events from notifications and audit_logs
  */
@@ -84,6 +104,8 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
         const totalTarget = n.recipient_count || 0;
         const isFailed = (n.error_count > 0 && successCount === 0);
 
+        const cleanAudience = formatTargetAudience(n.target_filter);
+
         events.push({
             id: n.id,
             action: `notification_${category}`,
@@ -92,12 +114,13 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
             subject: subj,
             recipient: `${successCount} / ${totalTarget} students`,
             recipientEmail: null,
+            targetAudience: cleanAudience,
             sentCount: successCount,
             errorCount: n.error_count || 0,
             status: isFailed ? 'failed' : 'delivered',
             timestamp: n.created_at,
             source: 'notification',
-            details: n.target_filter ? `Audience: ${typeof n.target_filter === 'object' ? JSON.stringify(n.target_filter) : n.target_filter}` : 'Audience: All active students'
+            details: `Target: ${cleanAudience}`
         });
     });
 
