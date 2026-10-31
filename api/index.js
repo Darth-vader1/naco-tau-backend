@@ -2,4 +2,6 @@
 // Vercel Serverless Function entry point when backend is deployed as its own repository
 const app = require('../server');
 
-module.exports = app;
+module.exports = (req, res) => {
+  return app(req, res);
+};

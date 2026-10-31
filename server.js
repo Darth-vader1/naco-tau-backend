@@ -205,7 +205,17 @@ const createRedisStore = (prefix) => {
   if (redisClient && RedisStore) {
     try {
       return new RedisStore({
-        sendCommand: (...args) => redisClient.call(...args),
+        sendCommand: async (...args) => {
+          if (!redisClient || (redisClient.status !== 'ready' && redisClient.status !== 'connecting')) {
+            return 0;
+          }
+          try {
+            return await redisClient.call(...args);
+          } catch (err) {
+            console.warn(`⚠️ RateLimit Redis fallback for ${prefix}:`, err.message);
+            return 0;
+          }
+        },
         prefix: `rl:${prefix}:`
       });
     } catch (err) {
@@ -426,7 +436,7 @@ if (!process.env.VERCEL) {
     logger.info(`   - CSRF Protection: ${process.env.ENABLE_CSRF === 'true' ? 'ENABLED' : 'DISABLED'}`);
     logger.info(`   - Sentry Monitoring: ${sentry.isEnabled ? 'ENABLED' : 'DISABLED'}`);
     logger.info(`   - Structured Logging: ENABLED`);
-    logger.info(`   - Rate Limiting: ENABLED (${redisStore ? 'Upstash Redis' : 'Memory'} store)`);
+    logger.info(`   - Rate Limiting: ENABLED (${redisClient ? 'Upstash Redis' : 'Memory'} store)`);
     logger.info(`   - XSS Protection: ENABLED`);
     logger.info(`   - Session Management: ENABLED`);
     logger.info(`   - CORS: ENABLED (${productionOrigins.length} origins)`);
