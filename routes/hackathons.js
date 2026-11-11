@@ -516,8 +516,11 @@ router.post('/admin/create', authenticate, requireAdmin, async (req, res) => {
 
         if (error) throw error;
 
-        if (hackathon) {
+        const shouldSendEmail = req.body.send_email !== false && req.body.send_email !== 'false' && req.body.sendEmail !== false;
+        if (hackathon && shouldSendEmail) {
             triggerAutoContentBroadcast('hackathons', hackathon);
+        } else if (hackathon && !shouldSendEmail) {
+            console.log('[hackathons/POST] Skipped email broadcast because send_email is false');
         }
 
         return successResponse(res, { hackathon }, 'Hackathon created successfully', 201);
