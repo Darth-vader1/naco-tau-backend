@@ -124,9 +124,34 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
         });
     });
 
+    // Pre-scan to deduplicate sign-up logs:
+    // When a student registers, 'student_registration' is logged (at signup).
+    // When they activate their profile / verify OTP, 'welcome_email_sent' is logged (actual email dispatch).
+    // If a student has both, we only display the 'welcome_email_sent' event so they aren't counted/shown twice.
+    const welcomeSentKeys = new Set();
+    (logs || []).forEach(l => {
+        if (l.action === 'welcome_email_sent') {
+            const email = (l.user_email || l.details?.email || '').toLowerCase().trim();
+            const matric = (l.details?.matric_no || l.details?.matricNo || '').toLowerCase().trim();
+            if (email) welcomeSentKeys.add(email);
+            if (matric) welcomeSentKeys.add(matric);
+            if (l.user_id) welcomeSentKeys.add(l.user_id);
+        }
+    });
+
     (logs || []).forEach(l => {
         const act = l.action || '';
         if (act === 'student_registration' || act === 'welcome_email_sent') {
+            const emailKey = (l.user_email || l.details?.email || '').toLowerCase().trim();
+            const matricKey = (l.details?.matric_no || l.details?.matricNo || '').toLowerCase().trim();
+
+            // Skip registration audit row if a genuine welcome_email_sent event exists for this student
+            if (act === 'student_registration') {
+                if (welcomeSentKeys.has(emailKey) || welcomeSentKeys.has(matricKey) || (l.user_id && welcomeSentKeys.has(l.user_id))) {
+                    return;
+                }
+            }
+
             const email = l.user_email || l.details?.email || 'New student';
             const name = `${l.details?.firstName || ''} ${l.details?.lastName || ''}`.trim() || l.details?.name || 'Student';
             const matric = l.details?.matricNo || l.details?.matric_no || null;
