@@ -45,6 +45,7 @@
 | 016 | `016_fix_double_encoded_skills_interests.sql` | Fix double-encoded JSON in skills/interests arrays | ✅ Applied |
 | 017 | `017_add_payments_transaction_id_index.sql` | Index on `payments.transaction_id` for receipt lookups | ⬜ Pending — run in Supabase SQL Editor |
 | 020 | `020_close_student_pii_and_payment_replay.sql` | Drop `students_directory_read` (PII leak), `security_invoker` on level view, unique `payments.transaction_id` | ⬜ Pending — run in Supabase SQL Editor |
+| 021 | `021_event_ticket_quantity.sql` | `ticket_quantity` on payments + event_registrations; re-sync `current_attendees` in tickets | ⬜ Pending — run BEFORE deploying the multi-ticket code |
 
 ---
 

@@ -966,23 +966,27 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
         const amountStr = payment?.amount ? formatNaira(payment.amount) : (event.payment_amount ? formatNaira(event.payment_amount) : 'Free');
         const refStr = payment?.transaction_id || payment?.reference || 'N/A';
         const ticketUrl = `${FRONTEND_URL}/events.html`;
+        const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
+        const admitStr = `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
+        const unitStr = qty > 1 && payment?.amount ? ` (${qty} × ${formatNaira(Number(payment.amount) / qty)})` : '';
 
         const metaRows = [
             { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #1b8c0c; letter-spacing: 1px;">${ticketNumber}</strong>` },
             { label: 'Event', value: `<strong>${eventTitle}</strong>` },
-            { label: 'Attendee', value: studentName },
+            { label: 'Ticket Holder', value: studentName },
+            { label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` },
             ...(student.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
             { label: 'Date', value: dateStr },
             { label: 'Time', value: timeStr },
             { label: 'Location / Venue', value: locationStr },
-            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">${amountStr}</span>` },
+            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">${amountStr}</span>${unitStr}` },
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
         const ticketNotice = `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
-                    🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification.
+                    🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
                 </p>
             </div>
         `;
@@ -1003,7 +1007,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
-            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
+            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nTickets: ${qty} (${admitStr})\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}${unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
 
         try {
@@ -1013,6 +1017,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
                 user_email: student.email,
                 details: {
                     ticket_number: ticketNumber,
+                    ticket_quantity: qty,
                     event_title: eventTitle,
                     event_id: event.id || null
                 },
@@ -1040,10 +1045,12 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
         const eventTitle = event?.title || payment?.description || 'Event / Dues';
         const dateStr = new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
         const adminUrl = `${FRONTEND_URL}/admin-dashboard.html`;
+        const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
 
         const metaRows = [
             { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #1b8c0c;">${amountStr}</strong>` },
             { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
+            ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && payment?.amount ? ` × ${formatNaira(Number(payment.amount) / qty)} each` : ''}` }] : []),
             { label: 'Student / Payer', value: studentName },
             ...(student?.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
             ...(student?.email ? [{ label: 'Student Email', value: student.email }] : []),
@@ -1080,7 +1087,7 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             to: recipients,
             subject: `💰 Payment Received: ${amountStr} from ${studentName} (${eventTitle})`,
             html,
-            text: `New Payment Received!\nAmount: ${amountStr}\nStudent: ${studentName} (${student?.matric_no || 'N/A'})\nEvent: ${eventTitle}\nRef: ${refStr}\nTicket: ${ticketNumber || 'N/A'}\nTime: ${dateStr}\n\nNACOS TAU Portal`
+            text: `New Payment Received!\nAmount: ${amountStr}\nStudent: ${studentName} (${student?.matric_no || 'N/A'})\nEvent: ${eventTitle}\nTickets: ${qty}\nRef: ${refStr}\nTicket: ${ticketNumber || 'N/A'}\nTime: ${dateStr}\n\nNACOS TAU Portal`
         });
     } catch (err) {
         console.error('Failed to send admin payment notification email:', err);

@@ -7,6 +7,14 @@ const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
 const crypto = require('crypto');
+const {
+  MAX_TICKETS_PER_ORDER,
+  parseTicketQuantity,
+  quantityOf,
+  orderTotal,
+  seatsRemaining,
+  syncAttendeeCount
+} = require('../utils/tickets');
 
 // ============================================
 // PAYMENT SAFETY HELPERS
@@ -120,7 +128,8 @@ async function issueEventTicket({ payment, event, userId }) {
       user_id: userId,
       registration_date: new Date().toISOString(),
       status: 'registered',
-      linked_payment_id: payment.id
+      linked_payment_id: payment.id,
+      ticket_quantity: quantityOf(payment)
     }], { onConflict: 'event_id,user_id' })
     .select()
     .single();
@@ -128,10 +137,7 @@ async function issueEventTicket({ payment, event, userId }) {
 
   const ticketNumber = registration?.ticket_number || ticketNumberFor(event.id, payment.id);
 
-  try {
-    const { count } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
-    if (typeof count === 'number') await supabase.from('events').update({ current_attendees: count }).eq('id', event.id);
-  } catch (_) { /* non-fatal */ }
+  await syncAttendeeCount(event.id);
 
   // Notifications are awaited (bounded) so a serverless platform cannot freeze
   // the function before they are sent, but a slow mail provider can't block
@@ -180,11 +186,36 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       return errorResponse(res, 'event_id is required to start a checkout session', 400);
     }
 
+    const quantity = parseTicketQuantity(req.body.quantity);
+    if (!quantity) {
+      return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
+    }
+
     const payable = await loadPayableEvent(event_id);
     if (payable.error) {
       return errorResponse(res, payable.error, payable.status);
     }
-    const { price } = payable;
+    const unitPrice = payable.price;
+    const price = orderTotal(unitPrice, quantity); // total charged for this order
+
+    // One order per student per event: a second checkout would be a double payment.
+    const { data: existingReg, error: existingRegErr } = await supabase
+      .from('event_registrations')
+      .select('id, ticket_quantity')
+      .eq('event_id', payable.event.id)
+      .eq('user_id', req.userId)
+      .maybeSingle();
+    if (existingRegErr) throw existingRegErr;
+    if (existingReg) {
+      return errorResponse(res, `You already have ${quantityOf(existingReg)} ticket(s) for this event.`, 409);
+    }
+
+    const remaining = await seatsRemaining(payable.event);
+    if (quantity > remaining) {
+      return errorResponse(res, remaining === 0
+        ? 'This event is fully booked.'
+        : `Only ${remaining} ticket(s) left for this event.`, 409);
+    }
 
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
@@ -199,6 +230,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
 
     // Format amount with 2 decimal places as required by Bachs pricing schema
     const formattedAmount = price.toFixed(2);
+    const ticketLabel = `${quantity} ticket${quantity > 1 ? 's' : ''}`;
 
     // Call Bachs API to create a session with documented pricing source
     const payload = {
@@ -266,10 +298,11 @@ router.post('/bachs-session', authenticate, async (req, res) => {
           user_id: req.userId,
           event_id: payable.event.id,
           amount: price,
+          ticket_quantity: quantity,
           payment_type: 'event_registration',
           transaction_id: String(checkoutId),
           payment_proof_url: receiptUrlFor(String(checkoutId)),
-          description: `Online payment for event: ${payable.event.title}`,
+          description: `Online payment for event: ${payable.event.title} (${ticketLabel})`,
           status: 'pending',
           submitted_at: new Date().toISOString(),
           notes: `${ONLINE_CHECKOUT_MARKER} Checkout started; awaiting gateway confirmation.`
@@ -286,7 +319,10 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     return successResponse(res, {
       checkout_url: data.checkout_url || data.url,
       checkout_id: checkoutId,
-      payment_id: paymentId
+      payment_id: paymentId,
+      quantity,
+      unit_price: unitPrice,
+      total_amount: price
     }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
@@ -307,7 +343,8 @@ router.post('/submit', authenticate, async (req, res) => {
       transaction_id,
       payment_proof_url,
       description,
-      event_id
+      event_id,
+      ticket_quantity
     } = req.body;
 
     if (!amount || !payment_type || !payment_proof_url) {
@@ -350,12 +387,17 @@ router.post('/submit', authenticate, async (req, res) => {
       return errorResponse(res, 'event_id is required for event_registration payments.', 400);
     }
 
+    const quantity = payment_type === 'event_registration' ? parseTicketQuantity(ticket_quantity) : 1;
+    if (!quantity) {
+      return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
+    }
+
     // If event_id is provided, confirm the target event actually exists and validate price.
     let resolvedEventId = null;
     if (event_id) {
       const { data: targetEvent, error: evErr } = await supabase
         .from('events')
-        .select('id, title, is_paid, payment_amount')
+        .select('id, title, requires_payment, payment_amount')
         .eq('id', event_id)
         .maybeSingle();
 
@@ -366,10 +408,11 @@ router.post('/submit', authenticate, async (req, res) => {
       resolvedEventId = targetEvent.id;
 
       // Medium Finding #3: Validate submitted amount against event payment_amount
-      if (targetEvent.is_paid && targetEvent.payment_amount) {
-        const requiredAmount = Number(targetEvent.payment_amount);
+      // (Previously checked a non-existent `is_paid` column, so this never ran.)
+      if (Number(targetEvent.payment_amount) > 0) {
+        const requiredAmount = orderTotal(targetEvent.payment_amount, quantity);
         if (parsedAmount < requiredAmount) {
-          return errorResponse(res, `Submitted amount (₦${parsedAmount}) is less than the required fee (₦${requiredAmount}) for "${targetEvent.title}".`, 400);
+          return errorResponse(res, `Submitted amount (₦${parsedAmount}) is less than the required total (₦${requiredAmount} for ${quantity} ticket${quantity > 1 ? 's' : ''}) for "${targetEvent.title}".`, 400);
         }
       }
     }
@@ -379,6 +422,7 @@ router.post('/submit', authenticate, async (req, res) => {
       .insert([{
         user_id: req.userId,
         amount: parsedAmount,
+        ticket_quantity: quantity,
         payment_type,
         transaction_id: cleanTransactionId || generateTransactionId(),
         payment_proof_url,
@@ -477,8 +521,11 @@ router.get('/receipt/:reference', async (req, res) => {
        '-' + payment.id.substring(0, 6).toUpperCase());
 
     // Public-safe payload: ticket status and event info only — no student PII
+    const ticketQuantity = quantityOf(registration || payment);
     const publicPayload = {
       ticket_number: ticketNumber,
+      ticket_quantity: ticketQuantity,
+      unit_price: Math.round((Number(payment.amount) / ticketQuantity) * 100) / 100,
       status: payment.status,
       payment_type: payment.payment_type,
       amount: payment.amount,
@@ -519,7 +566,7 @@ router.get('/receipt/:reference', async (req, res) => {
  * payment and issue the event ticket. Shared by /verify-paystack (redirect
  * return) and /:id/recheck (student-initiated recovery). Idempotent.
  */
-async function verifyAndSettle(req, res, { reference, event_id }) {
+async function verifyAndSettle(req, res, { reference, event_id, quantity: requestedQuantity }) {
   try {
     // This endpoint only settles event tickets; the price must come from an event.
     const payment_type = 'event_registration';
@@ -538,7 +585,7 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
       return errorResponse(res, payable.error, payable.status);
     }
     const targetEvent = payable.event;
-    const expectedAmount = payable.price;
+    const unitPrice = payable.price;
 
     // 2. Prevent replay: a reference belongs to exactly one user AND one event
     const { data: existingPayment, error: existingPayErr } = await supabase
@@ -570,25 +617,34 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
       }
     }
 
+    // Ticket quantity: the server-recorded checkout is authoritative. Without
+    // one (legacy / failed intent insert) the requested quantity is used, and
+    // the gateway amount check below guarantees it was paid for in full.
+    let quantity;
+    if (existingPayment && existingPayment.event_id === targetEvent.id && existingPayment.ticket_quantity) {
+      quantity = quantityOf(existingPayment);
+    } else {
+      quantity = parseTicketQuantity(requestedQuantity);
+      if (!quantity) {
+        return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
+      }
+    }
+    const expectedAmount = orderTotal(unitPrice, quantity);
+
     // Capacity check (skipped when this user is already registered, e.g. a retried verification)
-    if (typeof targetEvent.max_attendees === 'number' && targetEvent.max_attendees > 0) {
-      const { data: ownReg } = await supabase
-        .from('event_registrations')
-        .select('id')
-        .eq('event_id', targetEvent.id)
-        .eq('user_id', req.userId)
-        .maybeSingle();
+    const { data: ownReg } = await supabase
+      .from('event_registrations')
+      .select('id')
+      .eq('event_id', targetEvent.id)
+      .eq('user_id', req.userId)
+      .maybeSingle();
 
-      if (!ownReg) {
-        const { count, error: cntErr } = await supabase
-          .from('event_registrations')
-          .select('id', { count: 'exact', head: true })
-          .eq('event_id', targetEvent.id);
-
-        if (cntErr) throw cntErr;
-        if ((count ?? 0) >= targetEvent.max_attendees) {
-          return errorResponse(res, `Event is fully booked (${targetEvent.max_attendees} attendees reached).`, 409);
-        }
+    if (!ownReg) {
+      const remaining = await seatsRemaining(targetEvent);
+      if (quantity > remaining) {
+        return errorResponse(res, remaining === 0
+          ? `Event is fully booked (${targetEvent.max_attendees} tickets issued).`
+          : `Only ${remaining} ticket(s) left for this event.`, 409);
       }
     }
 
@@ -718,11 +774,11 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
         .insert([{
           user_id: req.userId,
           amount: paidAmount,
+          ticket_quantity: quantity,
           payment_type: payment_type,
           transaction_id: reference,
-
-          payment_proof_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/receipt.html?reference=${encodeURIComponent(reference)}`,
-          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Bachs online payment`,
+          payment_proof_url: receiptUrlFor(reference),
+          description: `Online payment for event: ${targetEvent.title} (${quantity} ticket${quantity > 1 ? 's' : ''})`,
           event_id: targetEvent ? targetEvent.id : null,
           status: 'verified',
           verified_by: req.userId,
@@ -741,7 +797,8 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
       const updates = {
         event_id: targetEvent.id,
         user_id: req.userId,
-        payment_type
+        payment_type,
+        ticket_quantity: quantity
       };
       if (paymentRecord.status !== 'verified') {
         Object.assign(updates, {
@@ -783,7 +840,8 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
           amount: paidAmount,
           reference: reference,
           event_id: targetEvent.id,
-          ticket_number: ticketNumber
+          ticket_number: ticketNumber,
+          ticket_quantity: quantityOf(paymentRecord)
         },
         ip: req.ip
       });
@@ -793,6 +851,9 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
       payment: paymentRecord,
       registration: registrationRecord,
       ticket_number: ticketNumber,
+      ticket_quantity: quantityOf(registrationRecord || paymentRecord),
+      unit_price: unitPrice,
+      total_amount: Number(paymentRecord.amount),
       event: targetEvent ? {
         id: targetEvent.id,
         title: targetEvent.title,
@@ -811,7 +872,7 @@ async function verifyAndSettle(req, res, { reference, event_id }) {
 
 // Student returns from the gateway (redirect / inline success callback)
 router.post('/verify-paystack', authenticate, (req, res) =>
-  verifyAndSettle(req, res, { reference: req.body?.reference, event_id: req.body?.event_id })
+  verifyAndSettle(req, res, { reference: req.body?.reference, event_id: req.body?.event_id, quantity: req.body?.quantity })
 );
 
 // ============================================
@@ -941,6 +1002,8 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       'Department',
       'Purpose / Event',
       'Payment Type',
+      'Tickets',
+      'Unit Price (NGN)',
       'Amount (NGN)',
       'Status',
       'Gateway',
@@ -958,6 +1021,8 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       const eventInfo = p.event_id ? eventMap[p.event_id] : null;
       const purpose = eventInfo?.title || p.description || (p.payment_type === 'event_registration' ? 'Event Registration' : 'Payment');
       const amount = Number(p.amount) || 0;
+      const tickets = p.payment_type === 'event_registration' ? quantityOf(p) : '';
+      const unitPrice = tickets ? Math.round((amount / tickets) * 100) / 100 : '';
       const gateway = p.gateway || (p.transaction_id?.startsWith('bach_') ? 'Bachs' : 'Paystack');
       const dateSubmitted = p.submitted_at || p.created_at ? new Date(p.submitted_at || p.created_at).toISOString() : '';
       const verifiedAt = p.verified_at ? new Date(p.verified_at).toISOString() : '';
@@ -970,10 +1035,12 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
         escapeCsv(department),
         escapeCsv(purpose),
         escapeCsv(p.payment_type || 'event_registration'),
+        escapeCsv(tickets),
+        escapeCsv(unitPrice),
         escapeCsv(amount),
         escapeCsv(p.status || 'verified'),
         escapeCsv(gateway),
-        escapeCsv(p.ticket_number || ''),
+        escapeCsv(p.ticket_number || (p.event_id && p.status === 'verified' ? ticketNumberFor(p.event_id, p.id) : '')),
         escapeCsv(dateSubmitted),
         escapeCsv(verifiedAt)
       ].join(',');
@@ -1157,16 +1224,14 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
                 user_id: data.user_id,
                 registration_date: new Date().toISOString(),
                 status: 'registered',
-                linked_payment_id: data.id
+                linked_payment_id: data.id,
+                ticket_quantity: quantityOf(data)
               }],
               { onConflict: 'event_id,user_id', ignoreDuplicates: false }
             );
 
           if (regErr) throw regErr;
-          try {
-            const { count: c } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', data.event_id);
-            if (typeof c === 'number') await supabase.from('events').update({ current_attendees: c }).eq('id', data.event_id);
-          } catch (_) {}
+          await syncAttendeeCount(data.event_id);
 
           await auditLog({
             action: 'event_registration_auto_created',
@@ -1188,6 +1253,7 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
             .eq('event_id', data.event_id)
             .eq('user_id', data.user_id)
             .eq('linked_payment_id', data.id);
+          await syncAttendeeCount(data.event_id);
         }
       } catch (autoErr) {
         console.error('Auto event registration sync error:', autoErr);
@@ -1417,12 +1483,20 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
   // Resolve event and its authoritative price
   let targetEvent = null;
   let expected = null;
+  let quantity = 1;
   const eventId = existing?.event_id || hintedEventId || null;
   if (eventId) {
     const payable = await loadPayableEvent(eventId);
     if (!payable.error) {
       targetEvent = payable.event;
-      expected = payable.price;
+      // Quantity comes from the server-recorded checkout. Without one, infer it
+      // from how many full tickets the confirmed amount covers.
+      if (existing && existing.event_id) {
+        quantity = quantityOf(existing);
+      } else if (Number.isFinite(amountNaira)) {
+        quantity = Math.min(MAX_TICKETS_PER_ORDER, Math.max(1, Math.floor((amountNaira + 0.01) / payable.price)));
+      }
+      expected = orderTotal(payable.price, quantity);
     }
   }
 
@@ -1441,10 +1515,13 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
         user_id: userId,
         event_id: targetEvent ? targetEvent.id : null,
         amount: Number.isFinite(amountNaira) ? amountNaira : 0,
+        ticket_quantity: quantity,
         payment_type: targetEvent ? 'event_registration' : 'other',
         transaction_id: reference,
         payment_proof_url: receiptUrlFor(reference),
-        description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Online payment (${source})`,
+        description: targetEvent
+          ? `Online payment for event: ${targetEvent.title} (${quantity} ticket${quantity > 1 ? 's' : ''})`
+          : `Online payment (${source})`,
         status: underpaid ? 'pending' : 'verified',
         verified_at: underpaid ? null : now,
         submitted_at: now,
@@ -1488,7 +1565,7 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
       await auditLog({
         action: 'webhook_payment_verified',
         userId: payment.user_id,
-        details: { payment_id: payment.id, amount: payment.amount, reference, event_id: targetEvent.id, ticket_number: ticketNumber, source },
+        details: { payment_id: payment.id, amount: payment.amount, ticket_quantity: quantityOf(payment), reference, event_id: targetEvent.id, ticket_number: ticketNumber, source },
         ip: null
       });
     }

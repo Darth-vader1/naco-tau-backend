@@ -1,6 +1,7 @@
 // routes/events.js
 const express = require('express');
 const router = express.Router();
+const { quantityOf, seatsRemaining, syncAttendeeCount } = require('../utils/tickets');
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
@@ -23,17 +24,10 @@ router.get('/upcoming', async (req, res) => {
 
     if (error) throw error;
 
-    // Sync current_attendees count on events table
-    try {
-      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', syncId);
-      if (typeof regCount === 'number') {
-        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
-      }
-    } catch (cntErr) {
-      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    // Sync current_attendees (counted in tickets) on the events table
+    {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id);
+      if (syncId) await syncAttendeeCount(syncId);
     }
 
     return successResponse(res, data || [], 'Upcoming events retrieved successfully');
@@ -108,17 +102,10 @@ router.get('/past', async (req, res) => {
 
     if (error) throw error;
 
-    // Sync current_attendees count on events table
-    try {
-      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', syncId);
-      if (typeof regCount === 'number') {
-        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
-      }
-    } catch (cntErr) {
-      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    // Sync current_attendees (counted in tickets) on the events table
+    {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id);
+      if (syncId) await syncAttendeeCount(syncId);
     }
 
     // Calculate pagination metadata
@@ -215,17 +202,10 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
     if (error) throw error;
 
-    // Sync current_attendees count on events table
-    try {
-      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', syncId);
-      if (typeof regCount === 'number') {
-        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
-      }
-    } catch (cntErr) {
-      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    // Sync current_attendees (counted in tickets) on the events table
+    {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id);
+      if (syncId) await syncAttendeeCount(syncId);
     }
 
     if (data) {
@@ -307,10 +287,11 @@ router.post('/:id/register', authenticate, async (req, res) => {
     // Require verified payment if event requires one.
     // ============================================
     let verifiedPaymentId = null;
+    let ticketQuantity = 1;
     if (event.requires_payment && Number(event.payment_amount) > 0) {
       const { data: verifiedPayment, error: payErr } = await supabase
         .from('payments')
-        .select('id, amount')
+        .select('id, amount, ticket_quantity')
         .eq('user_id', req.userId)
         .eq('event_id', event.id)
         .eq('payment_type', 'event_registration')
@@ -329,10 +310,12 @@ router.post('/:id/register', authenticate, async (req, res) => {
         );
       }
 
-      if (Number(verifiedPayment.amount) < Number(event.payment_amount)) {
+      ticketQuantity = quantityOf(verifiedPayment);
+      const requiredTotal = Number(event.payment_amount) * ticketQuantity;
+      if (Number(verifiedPayment.amount) + 0.01 < requiredTotal) {
         return errorResponse(
           res,
-          `Verified amount (₦${Number(verifiedPayment.amount).toLocaleString('en-NG')}) is less than the required event fee (₦${Number(event.payment_amount).toLocaleString('en-NG')}).`,
+          `Verified amount (₦${Number(verifiedPayment.amount).toLocaleString('en-NG')}) is less than the required total (₦${requiredTotal.toLocaleString('en-NG')} for ${ticketQuantity} ticket(s)).`,
           402
         );
       }
@@ -345,17 +328,14 @@ router.post('/:id/register', authenticate, async (req, res) => {
     // Reject overflow when registrations reach event.max_attendees.
     // ============================================
     if (typeof event.max_attendees === 'number' && event.max_attendees > 0) {
-      const { count, error: cntErr } = await supabase
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', event.id);
+      const remaining = await seatsRemaining(event);
 
-      if (cntErr) throw cntErr;
-
-      if ((count ?? 0) >= event.max_attendees) {
+      if (ticketQuantity > remaining) {
         return errorResponse(
           res,
-          `Event is fully booked (${event.max_attendees} / ${event.max_attendees} seats filled). Join the waitlist or contact the exco.`,
+          remaining > 0
+            ? `Only ${remaining} ticket(s) left, but this order has ${ticketQuantity}. Contact the exco.`
+            : `Event is fully booked (${event.max_attendees} / ${event.max_attendees} seats filled). Join the waitlist or contact the exco.`,
           409
         );
       }
@@ -369,24 +349,18 @@ router.post('/:id/register', authenticate, async (req, res) => {
         user_id: req.userId,
         registration_date: new Date().toISOString(),
         status: 'registered',
-        linked_payment_id: verifiedPaymentId
+        linked_payment_id: verifiedPaymentId,
+        ticket_quantity: ticketQuantity
       }])
       .select()
       .single();
 
     if (error) throw error;
 
-    // Sync current_attendees count on events table
-    try {
-      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id); if (syncId) { const { count: regCount } = await supabase
-        .from('event_registrations')
-        .select('id', { count: 'exact', head: true })
-        .eq('event_id', syncId);
-      if (typeof regCount === 'number') {
-        await supabase.from('events').update({ current_attendees: regCount }).eq('id', syncId); }
-      }
-    } catch (cntErr) {
-      console.warn('[register] could not sync current_attendees:', cntErr?.message || cntErr);
+    // Sync current_attendees (counted in tickets) on the events table
+    {
+      const syncId = (typeof id !== 'undefined' && id) ? id : (req.params && req.params.id);
+      if (syncId) await syncAttendeeCount(syncId);
     }
 
     return successResponse(res, { registration: data }, 'Successfully registered for event');
