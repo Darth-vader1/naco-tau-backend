@@ -173,7 +173,8 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       event_type,
       requires_payment,
       payment_amount,
-      max_attendees
+      max_attendees,
+      send_email
     } = req.body;
 
     if (!title || !date) {
@@ -208,8 +209,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       if (syncId) await syncAttendeeCount(syncId);
     }
 
-    if (data) {
+    const shouldSendEmail = send_email !== false && send_email !== 'false';
+    if (data && shouldSendEmail) {
       triggerAutoContentBroadcast('events', data);
+    } else if (data && !shouldSendEmail) {
+      console.log('[events/POST] Skipped email broadcast because send_email is false');
     }
 
     return successResponse(res, { event: data }, 'Event created successfully', 201);
@@ -270,15 +274,17 @@ router.post('/:id/register', authenticate, async (req, res) => {
       return errorResponse(res, 'Event not found or inactive', 404);
     }
 
-    // Check if already registered
-    const { data: existingRegistration, error: checkError } = await supabase
+    // Existing registrations (one row per order since migration 022)
+    const { data: existingRegistrations, error: checkError } = await supabase
       .from('event_registrations')
-      .select('id')
+      .select('id, linked_payment_id')
       .eq('event_id', id)
-      .eq('user_id', req.userId)
-      .maybeSingle();
+      .eq('user_id', req.userId);
+    if (checkError) throw checkError;
+    const myRegs = existingRegistrations || [];
+    const isPaidEvent = event.requires_payment && Number(event.payment_amount) > 0;
 
-    if (existingRegistration) {
+    if (!isPaidEvent && myRegs.length) {
       return errorResponse(res, 'You are already registered for this event', 409);
     }
 
@@ -289,7 +295,7 @@ router.post('/:id/register', authenticate, async (req, res) => {
     let verifiedPaymentId = null;
     let ticketQuantity = 1;
     if (event.requires_payment && Number(event.payment_amount) > 0) {
-      const { data: verifiedPayment, error: payErr } = await supabase
+      const { data: verifiedPayments, error: payErr } = await supabase
         .from('payments')
         .select('id, amount, ticket_quantity')
         .eq('user_id', req.userId)
@@ -297,10 +303,17 @@ router.post('/:id/register', authenticate, async (req, res) => {
         .eq('payment_type', 'event_registration')
         .eq('status', 'verified')
         .order('submitted_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(50);
 
       if (payErr) throw payErr;
+
+      // Use a verified order that doesn't have its tickets yet.
+      const linked = new Set(myRegs.map(r => r.linked_payment_id).filter(Boolean));
+      const verifiedPayment = (verifiedPayments || []).find(p => !linked.has(p.id));
+
+      if (!verifiedPayment && myRegs.length) {
+        return errorResponse(res, 'You are already registered for this event', 409);
+      }
 
       if (!verifiedPayment) {
         return errorResponse(
