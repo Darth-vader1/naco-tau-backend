@@ -331,12 +331,18 @@ router.get('/directory', authenticate, directoryLimiter, async (req, res) => {
       .in('visibility', ['students-only', 'public']);
 
     // Search in name and bio
-    if (search && search.trim() !== '') {
-      const searchTerm = search.trim();
-      query = query.or(
-        `name.ilike.%${searchTerm}%,` +
-        `bio.ilike.%${searchTerm}%`
-      );
+    if (typeof search === 'string' && search.trim() !== '') {
+      // SECURITY: the term is interpolated into a PostgREST `or()` filter string.
+      // Strip filter-syntax characters (, . ( ) : * % \ ") so a crafted search
+      // cannot inject extra conditions (e.g. `phone.like.0803*`) and probe
+      // fields hidden by privacy settings.
+      const searchTerm = search.replace(/[,.():*%\\"]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+      if (searchTerm) {
+        query = query.or(
+          `name.ilike.%${searchTerm}%,` +
+          `bio.ilike.%${searchTerm}%`
+        );
+      }
     }
 
     // Filter by department

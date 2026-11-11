@@ -9,30 +9,196 @@ const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../
 const crypto = require('crypto');
 
 // ============================================
+// PAYMENT SAFETY HELPERS
+// ============================================
+
+const isProductionEnv = () =>
+  process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production';
+
+// Simulated (fake) payments are only ever allowed when explicitly opted in for
+// local development. They can never be enabled on a production deployment.
+const isPaymentSimulationAllowed = () =>
+  process.env.ALLOW_PAYMENT_SIMULATION === 'true' && !isProductionEnv();
+
+const isBachsKeyConfigured = (key) => !!key && !key.includes('placeholder');
+
+// Constant-time string comparison (returns false on length mismatch).
+const safeEqual = (a, b) => {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+};
+
+/**
+ * Load a payable event and its authoritative price (in Naira) from the DB.
+ * The client-supplied amount is never trusted.
+ */
+async function loadPayableEvent(eventId) {
+  const { data: event, error } = await supabase
+    .from('events')
+    .select('*')
+    .eq('id', eventId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!event) return { error: 'Target event not found', status: 404 };
+  const price = Number(event.payment_amount);
+  if (!Number.isFinite(price) || price <= 0) {
+    return { error: 'This event does not require payment.', status: 400 };
+  }
+  return { event, price };
+}
+
+/**
+ * Build a simulated (fake) payment-session response — local development only.
+ */
+const simulationSession = (res, price, eventId, reason) => successResponse(res, {
+  checkout_url: `/simulation-checkout.html?amount=${price}&event_id=${encodeURIComponent(eventId)}`,
+  checkout_id: `chk_mock_${Date.now()}`,
+  is_simulation: true,
+  simulation_reason: reason
+}, 'Mock session created');
+
+// Marks a payments row that was created when an online checkout started (not a
+// manually uploaded proof). Such rows are settled only by gateway confirmation
+// (verify / re-check / webhook), never by an admin manually approving them.
+const ONLINE_CHECKOUT_MARKER = '[online-checkout]';
+const isOnlineCheckoutRow = (p) => !!p && typeof p.notes === 'string' && p.notes.includes(ONLINE_CHECKOUT_MARKER);
+
+const frontendBase = () => process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',')[0].trim() : 'https://nacosportal.vercel.app';
+const receiptUrlFor = (reference) => `${frontendBase()}/receipt.html?reference=${encodeURIComponent(reference)}`;
+
+// Deterministic ticket number: identical to the receipt page fallback, so the
+// emailed ticket, the receipt and repeated verifications always agree.
+const ticketNumberFor = (eventId, paymentId) =>
+  'NACOS-' + String(eventId).substring(0, 4).toUpperCase() + '-' + String(paymentId).substring(0, 6).toUpperCase();
+
+// Resolve within `ms` or give up (the work keeps going, we just stop waiting).
+const withTimeout = (promise, ms, label) => Promise.race([
+  promise,
+  new Promise(resolve => setTimeout(() => {
+    console.warn(`[payments] ${label} still running after ${ms}ms; continuing without waiting.`);
+    resolve();
+  }, ms))
+]);
+
+/**
+ * Idempotently register `userId` for `event` against a verified `payment`,
+ * then (first time only) send the ticket + admin emails and sync the admin
+ * payment_verification table.
+ *
+ * Safe to call any number of times for the same payment (verify, re-check and
+ * webhook may all race): the registration upsert is keyed on (event_id,
+ * user_id) and emails are only sent when this call created the link.
+ */
+async function issueEventTicket({ payment, event, userId }) {
+  const { data: existingReg, error: regLookupErr } = await supabase
+    .from('event_registrations')
+    .select('*')
+    .eq('event_id', event.id)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (regLookupErr) throw regLookupErr;
+
+  // Already linked to this payment => a retry; already linked to a DIFFERENT
+  // payment => the student paid twice. Either way keep the existing ticket.
+  if (existingReg && existingReg.linked_payment_id) {
+    if (existingReg.linked_payment_id !== payment.id) {
+      console.warn(`[payments] Duplicate payment ${payment.id} for user ${userId} on event ${event.id}; existing registration kept (refund candidate).`);
+    }
+    return {
+      registration: existingReg,
+      ticketNumber: existingReg.ticket_number || ticketNumberFor(event.id, existingReg.linked_payment_id),
+      newlyIssued: false
+    };
+  }
+
+  const { data: registration, error: regErr } = await supabase
+    .from('event_registrations')
+    .upsert([{
+      event_id: event.id,
+      user_id: userId,
+      registration_date: new Date().toISOString(),
+      status: 'registered',
+      linked_payment_id: payment.id
+    }], { onConflict: 'event_id,user_id' })
+    .select()
+    .single();
+  if (regErr) throw regErr;
+
+  const ticketNumber = registration?.ticket_number || ticketNumberFor(event.id, payment.id);
+
+  try {
+    const { count } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
+    if (typeof count === 'number') await supabase.from('events').update({ current_attendees: count }).eq('id', event.id);
+  } catch (_) { /* non-fatal */ }
+
+  // Notifications are awaited (bounded) so a serverless platform cannot freeze
+  // the function before they are sent, but a slow mail provider can't block
+  // the student's confirmation for long either.
+  await withTimeout((async () => {
+    try {
+      const { data: student } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
+      if (student && student.email) {
+        await sendEventTicketEmail({ student, event, ticketNumber, payment });
+      }
+      await sendPaymentAdminNotificationEmail({
+        student: student || { name: 'Student', email: '' },
+        event,
+        payment,
+        ticketNumber
+      });
+      try {
+        await supabase.from('payment_verification').insert([{
+          student_id: student?.id || null,
+          event_id: event.id,
+          amount: payment.amount,
+          payment_reference: payment.transaction_id,
+          status: 'verified',
+          created_at: new Date().toISOString()
+        }]);
+      } catch (pvErr) {
+        console.warn('payment_verification sync notice:', pvErr?.message || pvErr);
+      }
+    } catch (notifyErr) {
+      console.error('Ticket/Admin email dispatch error:', notifyErr);
+    }
+  })(), 8000, 'ticket notifications');
+
+  return { registration, ticketNumber, newlyIssued: true };
+}
+
+// ============================================
 // CREATE BACHS CHECKOUT SESSION
 // ============================================
 router.post('/bachs-session', authenticate, async (req, res) => {
   try {
-    const { amount, event_id, title } = req.body;
+    // SECURITY: the client-supplied `amount` is ignored. The price always
+    // comes from the event record so a tampered request cannot pay less.
+    const { event_id } = req.body;
+    if (!event_id) {
+      return errorResponse(res, 'event_id is required to start a checkout session', 400);
+    }
+
+    const payable = await loadPayableEvent(event_id);
+    if (payable.error) {
+      return errorResponse(res, payable.error, payable.status);
+    }
+    const { price } = payable;
+
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
-    if (!bachsSecret || bachsSecret.includes('placeholder')) {
-      if (process.env.NODE_ENV === 'production') {
-        console.error('[Bachs] BACHS_SECRET_KEY is missing/placeholder in production environment.');
+    if (!isBachsKeyConfigured(bachsSecret)) {
+      if (!isPaymentSimulationAllowed()) {
+        console.error('[Bachs] BACHS_SECRET_KEY is missing/placeholder and simulation is not allowed.');
         return errorResponse(res, 'Payment gateway configuration error. Please contact administrator.', 503);
       }
-      console.warn('[Bachs] BACHS_SECRET_KEY not configured in environment variables.');
-      return successResponse(res, {
-        checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
-        checkout_id: `chk_mock_${Date.now()}`,
-        is_simulation: true,
-        simulation_reason: 'BACHS_SECRET_KEY is missing or not set in Vercel Project Environment Variables.'
-      }, 'Mock session created');
+      console.warn('[Bachs] BACHS_SECRET_KEY not configured; returning local simulation session.');
+      return simulationSession(res, price, event_id, 'BACHS_SECRET_KEY is not configured (local simulation mode).');
     }
 
     // Format amount with 2 decimal places as required by Bachs pricing schema
-    const numAmount = Number(amount) || 0;
-    const formattedAmount = numAmount.toFixed(2);
+    const formattedAmount = price.toFixed(2);
 
     // Call Bachs API to create a session with documented pricing source
     const payload = {
@@ -44,7 +210,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
         email: req.user?.email || 'student@tau.edu.ng',
         name: req.user?.name || 'Student'
       },
-      success_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=success&event_id=${event_id}`,
+      success_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=success&event_id=${encodeURIComponent(event_id)}`,
       cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`
     };
 
@@ -80,19 +246,47 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     if (!bachsRes || !bachsRes.ok) {
       const errDetail = data?.detail || data?.message || data?.error_code || 'Unable to establish session with Bachs';
       const status = bachsRes ? bachsRes.status : 504;
-      console.error('Bachs session error:', data);
-      console.warn('Falling back to simulation mode due to Bachs API error.');
-      return successResponse(res, {
-        checkout_url: `/simulation-checkout.html?amount=${amount}&event_id=${event_id}`,
-        checkout_id: `chk_mock_${Date.now()}`,
-        is_simulation: true,
-        simulation_reason: `Bachs API error (${status} on ${targetUrl}): ${errDetail}`
-      }, 'Mock session created (API Fallback)');
+      console.error('Bachs session error:', status, data);
+      if (isPaymentSimulationAllowed()) {
+        return simulationSession(res, price, event_id, `Bachs API error (${status}): ${errDetail}`);
+      }
+      return errorResponse(res, 'The payment gateway is temporarily unavailable. Please try again shortly.', 502);
+    }
+
+    const checkoutId = data.id || data.checkout_id || data.session_id;
+
+    // Record the checkout server-side so the payment can always be recovered
+    // (webhook, re-check button) even if the student's tab/session is lost
+    // during the gateway redirect. Non-fatal: checkout still proceeds if this fails.
+    let paymentId = null;
+    if (checkoutId) {
+      const { data: intent, error: intentErr } = await supabase
+        .from('payments')
+        .insert([{
+          user_id: req.userId,
+          event_id: payable.event.id,
+          amount: price,
+          payment_type: 'event_registration',
+          transaction_id: String(checkoutId),
+          payment_proof_url: receiptUrlFor(String(checkoutId)),
+          description: `Online payment for event: ${payable.event.title}`,
+          status: 'pending',
+          submitted_at: new Date().toISOString(),
+          notes: `${ONLINE_CHECKOUT_MARKER} Checkout started; awaiting gateway confirmation.`
+        }])
+        .select('id')
+        .maybeSingle();
+      if (intentErr) {
+        console.error('[Bachs] Could not record checkout intent:', intentErr.message);
+      } else {
+        paymentId = intent?.id || null;
+      }
     }
 
     return successResponse(res, {
       checkout_url: data.checkout_url || data.url,
-      checkout_id: data.id || data.checkout_id || data.session_id
+      checkout_id: checkoutId,
+      payment_id: paymentId
     }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
@@ -320,35 +514,72 @@ router.get('/receipt/:reference', async (req, res) => {
 // ============================================
 // VERIFY PAYSTACK PAYMENT (Student instant verification)
 // ============================================
-router.post('/verify-paystack', authenticate, async (req, res) => {
+/**
+ * Verify `reference` with the gateway and, if it is paid in full, record the
+ * payment and issue the event ticket. Shared by /verify-paystack (redirect
+ * return) and /:id/recheck (student-initiated recovery). Idempotent.
+ */
+async function verifyAndSettle(req, res, { reference, event_id }) {
   try {
-    const { reference, event_id, payment_type = 'event_registration' } = req.body;
+    // This endpoint only settles event tickets; the price must come from an event.
+    const payment_type = 'event_registration';
 
-    if (!reference) {
-      return errorResponse(res, 'Paystack transaction reference is required', 400);
+    if (!reference || typeof reference !== 'string' || reference.length > 200) {
+      return errorResponse(res, 'A valid payment reference is required', 400);
     }
 
-    if (payment_type === 'event_registration' && !event_id) {
+    if (!event_id) {
       return errorResponse(res, 'event_id is required for event registration payments', 400);
     }
 
-    // 1. Fetch Event Details if registering for an event
-    let targetEvent = null;
-    if (event_id) {
-      const { data: event, error: eventErr } = await supabase
-        .from('events')
-        .select('*')
-        .eq('id', event_id)
+    // 1. Fetch event details and its authoritative price (Naira)
+    const payable = await loadPayableEvent(event_id);
+    if (payable.error) {
+      return errorResponse(res, payable.error, payable.status);
+    }
+    const targetEvent = payable.event;
+    const expectedAmount = payable.price;
+
+    // 2. Prevent replay: a reference belongs to exactly one user AND one event
+    const { data: existingPayment, error: existingPayErr } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('transaction_id', reference)
+      .maybeSingle();
+
+    if (existingPayErr) throw existingPayErr;
+
+    if (existingPayment && existingPayment.user_id && existingPayment.user_id !== req.userId) {
+      return errorResponse(res, 'This payment reference is already associated with another account.', 403);
+    }
+
+    if (existingPayment && existingPayment.event_id && existingPayment.event_id !== targetEvent.id) {
+      return errorResponse(res, 'This payment reference has already been used for a different event.', 409);
+    }
+
+    if (existingPayment && !existingPayment.event_id) {
+      // A webhook-created row has no event yet. Only claim it if no registration already uses it.
+      const { data: linkedReg, error: linkedErr } = await supabase
+        .from('event_registrations')
+        .select('id, event_id')
+        .eq('linked_payment_id', existingPayment.id)
+        .maybeSingle();
+      if (linkedErr) throw linkedErr;
+      if (linkedReg && linkedReg.event_id !== targetEvent.id) {
+        return errorResponse(res, 'This payment reference has already been used for a different event.', 409);
+      }
+    }
+
+    // Capacity check (skipped when this user is already registered, e.g. a retried verification)
+    if (typeof targetEvent.max_attendees === 'number' && targetEvent.max_attendees > 0) {
+      const { data: ownReg } = await supabase
+        .from('event_registrations')
+        .select('id')
+        .eq('event_id', targetEvent.id)
+        .eq('user_id', req.userId)
         .maybeSingle();
 
-      if (eventErr) throw eventErr;
-      if (!event) {
-        return errorResponse(res, 'Target event not found', 404);
-      }
-      targetEvent = event;
-
-      // Check capacity
-      if (typeof targetEvent.max_attendees === 'number' && targetEvent.max_attendees > 0) {
+      if (!ownReg) {
         const { count, error: cntErr } = await supabase
           .from('event_registrations')
           .select('id', { count: 'exact', head: true })
@@ -361,24 +592,20 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
       }
     }
 
-    // 2. Prevent replay attacks: check if reference already exists for another user
-    const { data: existingPayment, error: existingPayErr } = await supabase
-      .from('payments')
-      .select('*')
-      .eq('transaction_id', reference)
-      .maybeSingle();
-
-    if (existingPayErr) throw existingPayErr;
-
-    if (existingPayment && existingPayment.user_id !== req.userId) {
-      return errorResponse(res, 'This payment reference is already associated with another account.', 403);
-    }
+    const simulatedPayment = (channel) => ({
+      status: 'success',
+      amount: expectedAmount * 100,
+      currency: 'NGN',
+      channel,
+      reference,
+      paid_at: new Date().toISOString()
+    });
 
     // 3. Verify with Bachs API
     const bachsSecret = process.env.BACHS_SECRET_KEY;
     let verifiedPaymentData = null;
 
-    if (bachsSecret && !bachsSecret.includes('placeholder')) {
+    if (isBachsKeyConfigured(bachsSecret)) {
       const isLive = bachsSecret.startsWith('sk_live_');
       const baseUrl = isLive ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
       const candidateGetUrls = [
@@ -412,7 +639,6 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
         }
 
         const sessionObj = verifyData?.data || verifyData || {};
-        console.log('[Bachs] Verification lookup response:', JSON.stringify(sessionObj));
 
         const sessionStatus = String(sessionObj.status || sessionObj.payment_status || sessionObj.state || '').toLowerCase();
         const isPaidOrCompleted = 
@@ -423,31 +649,46 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
           sessionObj.paid === true;
 
         if (!verifyRes || !verifyRes.ok || !isPaidOrCompleted) {
-          // If live verification returned non-completed status or lookup failed
-          if (!isLive) {
-            console.warn(`[Bachs] Sandbox verification simulated for "${reference}"`);
-            const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
-            verifiedPaymentData = {
-              status: 'success',
-              amount: simulatedAmount,
-              currency: 'NGN',
-              channel: 'card (bachs sandbox simulated)',
-              reference: reference,
-              paid_at: new Date().toISOString()
-            };
+          // SECURITY: an unverified reference is never treated as paid (not even
+          // on a sandbox key) unless simulation is explicitly enabled for local dev.
+          if (isPaymentSimulationAllowed()) {
+            console.warn(`[Bachs] Local simulation: accepting unverified reference "${reference}"`);
+            verifiedPaymentData = simulatedPayment('card (local simulation)');
           } else {
             const reason = verifyData?.message || verifyData?.detail || `Session status is "${sessionStatus || 'unknown'}" (expected completed/paid)`;
-            return errorResponse(res, `Bachs verification: ${reason}`, 400);
+            return errorResponse(res, `Payment could not be verified: ${reason}`, 400);
           }
         } else {
-          // Actual verification succeeded!
-          const rawAmount = sessionObj.pricing?.amount || sessionObj.amount;
-          const numAmount = rawAmount ? (parseFloat(rawAmount) * 100) : (targetEvent ? Number(targetEvent.payment_amount) * 100 : 0);
+          // Verified by the gateway. The gateway must report the amount; never
+          // fall back to the event price.
+          const rawAmount = sessionObj.pricing?.amount ?? sessionObj.amount;
+          const gatewayNaira = parseFloat(rawAmount);
+          const currency = String(sessionObj.pricing?.currency || sessionObj.currency || 'NGN').toUpperCase();
+
+          if (!Number.isFinite(gatewayNaira)) {
+            console.error('[Bachs] Verified session has no readable amount:', reference);
+            return errorResponse(res, 'Payment could not be verified: amount missing from gateway response.', 400);
+          }
+          if (currency !== 'NGN') {
+            return errorResponse(res, `Payment could not be verified: unexpected currency ${currency}.`, 400);
+          }
+          // 1 kobo rounding tolerance
+          if (gatewayNaira + 0.01 < expectedAmount) {
+            console.warn(`[Bachs] Amount mismatch for ${reference}: paid ${gatewayNaira}, expected ${expectedAmount} (event ${targetEvent.id}, user ${req.userId})`);
+            return errorResponse(res, `Amount paid (₦${gatewayNaira}) is less than the event fee (₦${expectedAmount}).`, 400);
+          }
+
+          // Bind the checkout to the paying account when the gateway reports a customer email.
+          const customerEmail = String(sessionObj.customer?.email || sessionObj.customer_email || '').trim().toLowerCase();
+          const userEmail = String(req.user?.email || '').trim().toLowerCase();
+          if (customerEmail && userEmail && customerEmail !== userEmail) {
+            return errorResponse(res, 'This payment was made from a different account.', 403);
+          }
 
           verifiedPaymentData = {
             status: 'success',
-            amount: numAmount,
-            currency: sessionObj.pricing?.currency || sessionObj.currency || 'NGN',
+            amount: Math.round(gatewayNaira * 100),
+            currency,
             channel: sessionObj.mode || sessionObj.channel || 'online checkout',
             reference: sessionObj.id || sessionObj.checkout_id || sessionObj.reference || reference,
             paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString()
@@ -458,24 +699,15 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
         return errorResponse(res, 'Internal server error during payment verification', 500);
       }
     } else {
-      // Mock / Dev Fallback when secret key is not yet set
-      if (process.env.NODE_ENV === 'production') {
-        console.error('[Bachs] Live secret key missing in production verification attempt.');
-        return errorResponse(res, 'Payment gateway configuration error in production.', 500);
+      if (!isPaymentSimulationAllowed()) {
+        console.error('[Bachs] BACHS_SECRET_KEY missing and simulation not allowed; refusing verification.');
+        return errorResponse(res, 'Payment gateway configuration error. Please contact administrator.', 503);
       }
-      console.warn(`[Bachs] BACHS_SECRET_KEY not set. Accepting test reference "${reference}" in dev mode.`);
-      const simulatedAmount = targetEvent ? Number(targetEvent.payment_amount) * 100 : 0;
-      verifiedPaymentData = {
-        status: 'success',
-        amount: simulatedAmount,
-        currency: 'NGN',
-        channel: 'card (test)',
-        reference: reference,
-        paid_at: new Date().toISOString()
-      };
+      console.warn(`[Bachs] BACHS_SECRET_KEY not set. Local simulation accepting reference "${reference}".`);
+      verifiedPaymentData = simulatedPayment('card (local simulation)');
     }
 
-    const paidAmount = verifiedPaymentData.amount ? verifiedPaymentData.amount / 100 : (targetEvent ? Number(targetEvent.payment_amount) : 0);
+    const paidAmount = verifiedPaymentData.amount / 100;
 
     // 4. Save/update payment record in database
     let paymentRecord = existingPayment;
@@ -503,114 +735,59 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
 
       if (createPayErr) throw createPayErr;
       paymentRecord = newPayment;
-    } else if (paymentRecord.status !== 'verified') {
-      const { data: updatedPayment, error: updatePayErr } = await supabase
-        .from('payments')
-        .update({
+    } else if (paymentRecord.status !== 'verified' || !paymentRecord.event_id || !paymentRecord.user_id) {
+      // Claim the row for this user + event. The filter makes the claim atomic:
+      // if a concurrent request already bound it to another event/user, no row matches.
+      const updates = {
+        event_id: targetEvent.id,
+        user_id: req.userId,
+        payment_type
+      };
+      if (paymentRecord.status !== 'verified') {
+        Object.assign(updates, {
+          amount: paidAmount,
           status: 'verified',
           verified_by: req.userId,
           verified_at: new Date().toISOString(),
           notes: `Verified via Bachs (${verifiedPaymentData.channel || 'online checkout'})`
-        })
+        });
+      }
+
+      const { data: updatedPayment, error: updatePayErr } = await supabase
+        .from('payments')
+        .update(updates)
         .eq('id', paymentRecord.id)
+        .or(`event_id.is.null,event_id.eq.${targetEvent.id}`)
+        .or(`user_id.is.null,user_id.eq.${req.userId}`)
         .select()
-        .single();
+        .maybeSingle();
 
       if (updatePayErr) throw updatePayErr;
+      if (!updatedPayment) {
+        return errorResponse(res, 'This payment reference has already been used for a different event.', 409);
+      }
       paymentRecord = updatedPayment;
     }
 
-    // 5. If event registration, register student and generate ticket
-    let registrationRecord = null;
-    let ticketNumber = null;
+    // 5. Register student and issue the ticket (idempotent; emails only on first issue)
+    const { registration: registrationRecord, ticketNumber, newlyIssued } =
+      await issueEventTicket({ payment: paymentRecord, event: targetEvent, userId: req.userId });
 
-    if (targetEvent) {
-      ticketNumber = 'NACOS-' + targetEvent.id.substring(0, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
-
-      const { data: reg, error: regErr } = await supabase
-        .from('event_registrations')
-        .upsert([{
+    // 6. Audit log (first settlement only, so retries/re-checks don't spam the trail)
+    if (newlyIssued) {
+      await auditLog({
+        action: 'bachs_payment_verified',
+        userId: req.userId,
+        details: {
+          payment_id: paymentRecord.id,
+          amount: paidAmount,
+          reference: reference,
           event_id: targetEvent.id,
-          user_id: req.userId,
-          registration_date: new Date().toISOString(),
-          status: 'registered',
-          linked_payment_id: paymentRecord.id
-        }], { onConflict: 'event_id,user_id' })
-        .select()
-        .single();
-
-      if (regErr) {
-        console.error('Event registration upsert error:', regErr);
-        throw regErr;
-      }
-      registrationRecord = reg;
-      try {
-        const { count: c } = await supabase.from('event_registrations').select('id', { count: 'exact', head: true }).eq('event_id', targetEvent.id);
-        if (typeof c === 'number') await supabase.from('events').update({ current_attendees: c }).eq('id', targetEvent.id);
-      } catch (_) {}
-
-      // 6. Send Ticket & Admin Payment Alert Emails asynchronously
-      (async () => {
-        try {
-          const { data: student } = await supabase
-            .from('students')
-            .select('*')
-            .eq('user_id', req.userId)
-            .maybeSingle();
-
-          // A. Send ticket confirmation to student
-          if (student && student.email) {
-            await sendEventTicketEmail({
-              student,
-              event: targetEvent,
-              ticketNumber,
-              payment: paymentRecord
-            });
-          }
-
-          // B. Send payment notification alert to nacos@tau.edu.ng
-          await sendPaymentAdminNotificationEmail({
-            student: student || { name: 'Student', email: req.userEmail || '' },
-            event: targetEvent,
-            payment: paymentRecord,
-            ticketNumber
-          });
-
-          // C. Also sync to payment_verification table so admin dashboard displays it
-          try {
-            await supabase
-              .from('payment_verification')
-              .insert([{
-                student_id: student?.id || null,
-                event_id: targetEvent.id,
-                amount: paidAmount,
-                payment_reference: reference,
-                status: 'verified',
-                created_at: new Date().toISOString()
-              }]);
-          } catch (pvErr) {
-            console.warn('payment_verification sync notice:', pvErr?.message || pvErr);
-          }
-
-        } catch (emailErr) {
-          console.error('Ticket/Admin email dispatch error:', emailErr);
-        }
-      })();
+          ticket_number: ticketNumber
+        },
+        ip: req.ip
+      });
     }
-
-    // 7. Audit log
-    await auditLog({
-      action: 'bachs_payment_verified',
-      userId: req.userId,
-      details: {
-        payment_id: paymentRecord.id,
-        amount: paidAmount,
-        reference: reference,
-        event_id: targetEvent ? targetEvent.id : null,
-        ticket_number: ticketNumber
-      },
-      ip: req.ip
-    });
 
     return successResponse(res, {
       payment: paymentRecord,
@@ -627,8 +804,51 @@ router.post('/verify-paystack', authenticate, async (req, res) => {
     }, 'Payment successfully verified and registration confirmed!', 200);
 
   } catch (error) {
-    console.error('Paystack verification error:', error);
-    return errorResponse(res, error.message || 'Failed to verify Paystack payment', 500, error);
+    console.error('Payment verification error:', error);
+    return errorResponse(res, 'Failed to verify payment. Please try again.', 500, error);
+  }
+}
+
+// Student returns from the gateway (redirect / inline success callback)
+router.post('/verify-paystack', authenticate, (req, res) =>
+  verifyAndSettle(req, res, { reference: req.body?.reference, event_id: req.body?.event_id })
+);
+
+// ============================================
+// RE-CHECK AN ONLINE PAYMENT (Student self-service recovery)
+// ============================================
+// For a checkout the student started (e.g. paid, then lost signal during the
+// redirect). Re-queries the gateway using the server-recorded reference and
+// event, so nothing has to survive in the browser.
+router.post('/:id/recheck', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+      return errorResponse(res, 'Invalid payment id', 400);
+    }
+
+    const { data: payment, error } = await supabase
+      .from('payments')
+      .select('id, user_id, event_id, transaction_id, status, notes')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+
+    // Same 404 for "not yours" and "missing" so ids can't be probed.
+    if (!payment || payment.user_id !== req.userId) {
+      return errorResponse(res, 'Payment not found', 404);
+    }
+    if (!payment.event_id || !payment.transaction_id) {
+      return errorResponse(res, 'This payment cannot be re-checked online. Please contact an administrator.', 400);
+    }
+    if (payment.status === 'rejected') {
+      return errorResponse(res, 'This payment was rejected. Please contact an administrator.', 409);
+    }
+
+    return verifyAndSettle(req, res, { reference: payment.transaction_id, event_id: payment.event_id });
+  } catch (error) {
+    console.error('Payment re-check error:', error);
+    return errorResponse(res, 'Failed to re-check payment. Please try again.', 500, error);
   }
 });
 
@@ -852,11 +1072,17 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
     // State machine: only a pending payment can be decided, exactly once.
     const { data: existing, error: existingErr } = await supabase
       .from('payments')
-      .select('id, status, user_id')
+      .select('id, status, user_id, notes')
       .eq('id', id)
       .maybeSingle();
 
     if (existingErr) throw existingErr;
+
+    // Online checkouts are confirmed by the gateway, not by eye: approving one
+    // manually could issue a ticket for a checkout that was never paid.
+    if (existing && status === 'verified' && isOnlineCheckoutRow(existing)) {
+      return errorResponse(res, 'This is an online checkout. It is confirmed automatically by the payment gateway (or by the student tapping "Re-check payment"); it cannot be approved manually.', 409);
+    }
     if (!existing) {
       return errorResponse(res, 'Payment record not found', 404);
     }
@@ -1051,7 +1277,8 @@ router.post('/webhook', async (req, res) => {
   if (isBachsEvent) {
     // Critical Finding #1: Enforce signature / secret verification on Bachs webhook
     const signature = req.headers['x-bachs-signature'] || req.headers['bachs-signature'] || req.headers['x-signature'];
-    const webhookToken = req.headers['x-webhook-token'] || req.headers['x-webhook-secret'] || req.query.secret;
+    // Shared-secret header only: query-string secrets end up in access logs.
+    const webhookToken = req.headers['x-webhook-token'] || req.headers['x-webhook-secret'];
 
     let isAuthorized = false;
     if (bachsSecret) {
@@ -1067,7 +1294,7 @@ router.post('/webhook', async (req, res) => {
             isAuthorized = true;
           }
         } catch (_) {}
-      } else if (webhookToken && webhookToken === bachsSecret) {
+      } else if (webhookToken && safeEqual(webhookToken, bachsSecret)) {
         isAuthorized = true;
       }
     }
@@ -1077,52 +1304,30 @@ router.post('/webhook', async (req, res) => {
       return res.status(401).send('Unauthorized: Invalid or missing Bachs signature');
     }
 
-    res.sendStatus(200); // Acknowledge verified Bachs webhook immediately
+    // Do all the work BEFORE acknowledging: on serverless platforms the function
+    // can be frozen as soon as the response is sent. On failure we return 500 so
+    // the gateway retries (settlement is idempotent).
     try {
       const bData = event.data || event;
       const ref = bData.id || bData.checkout_id || bData.reference || bData.code;
       const status = String(bData.status || bData.state || event.type || '').toLowerCase();
-      
-      if (status.includes('completed') || status.includes('success') || status.includes('paid')) {
-        const rawAmt = bData.pricing?.amount || bData.amount || 0;
-        const amt = parseFloat(rawAmt) || 0;
 
-        const { data: existing } = await supabase.from('payments').select('id, status, user_id').eq('transaction_id', ref).maybeSingle();
-        if (existing && existing.status === 'verified') return;
-
-        // Medium Finding #6: Resolve student user_id to prevent orphan records
-        const customerEmail = bData.customer?.email || event.customer?.email || bData.metadata?.email;
-        let resolvedUserId = existing?.user_id || null;
-        if (!resolvedUserId && customerEmail) {
-          const { data: matchedStudent } = await supabase.from('students').select('user_id').eq('email', customerEmail.toLowerCase().trim()).maybeSingle();
-          if (matchedStudent) resolvedUserId = matchedStudent.user_id;
-        }
-
-        let payId = existing?.id;
-        if (!existing) {
-          const { data: newP } = await supabase.from('payments').insert([{
-            user_id: resolvedUserId,
-            amount: amt,
-            transaction_id: ref,
-            status: 'verified',
-            verified_at: new Date().toISOString(),
-            submitted_at: new Date().toISOString(),
-            notes: resolvedUserId ? 'Verified via Bachs Webhook' : `Verified via Bachs Webhook (Unmatched email: ${customerEmail || 'unknown'})`
-          }]).select().single();
-          payId = newP?.id;
-        } else {
-          await supabase.from('payments').update({
-            user_id: resolvedUserId || existing.user_id,
-            status: 'verified',
-            verified_at: new Date().toISOString(),
-            notes: 'Verified via Bachs Webhook'
-          }).eq('id', existing.id);
-        }
+      if (ref && (status.includes('completed') || status.includes('success') || status.includes('paid'))) {
+        const rawAmt = bData.pricing?.amount ?? bData.amount;
+        const result = await settleWebhookPayment({
+          reference: String(ref),
+          amountNaira: parseFloat(rawAmt),
+          currency: bData.pricing?.currency || bData.currency || 'NGN',
+          customerEmail: bData.customer?.email || event.customer?.email || bData.metadata?.email,
+          source: 'Bachs webhook'
+        });
+        console.log('[Bachs Webhook] Settled', ref, JSON.stringify(result));
       }
+      return res.sendStatus(200);
     } catch (bErr) {
       console.error('[Bachs Webhook Error]:', bErr);
+      return res.status(500).send('Processing error; please retry');
     }
-    return;
   }
 
   // Paystack verification
@@ -1139,137 +1344,158 @@ router.post('/webhook', async (req, res) => {
     hash = crypto.createHmac('sha512', paystackSecret).update(JSON.stringify(req.body)).digest('hex');
   }
   
-  if (hash !== signature) {
+  if (!safeEqual(hash, signature)) {
     return res.status(400).send('Invalid signature');
   }
 
-  res.sendStatus(200); // Immediately acknowledge Paystack
+  // Process first, acknowledge after (see Bachs branch above for why).
+  if (event.event !== 'charge.success') {
+    return res.sendStatus(200);
+  }
 
-  if (event.event === 'charge.success') {
-    const data = event.data;
-    const reference = data.reference;
-    const amountPaid = data.amount / 100; // Convert kobo to Naira
+  try {
+    const data = event.data || {};
     const metadata = data.metadata || {};
-    
-    // Extract metadata injected from frontend
-    let eventId = null;
-    let userId = null;
-    let ticketNumber = null;
-    let targetEvent = null;
-    let student = null;
-
-    if (metadata.custom_fields && Array.isArray(metadata.custom_fields)) {
-      const eField = metadata.custom_fields.find(f => f.variable_name === 'event_id');
-      const uField = metadata.custom_fields.find(f => f.variable_name === 'user_id');
-      if (eField) eventId = eField.value;
-      if (uField) userId = uField.value;
+    let hintedEventId = null;
+    let hintedUserId = null;
+    if (Array.isArray(metadata.custom_fields)) {
+      hintedEventId = metadata.custom_fields.find(f => f.variable_name === 'event_id')?.value || null;
+      hintedUserId = metadata.custom_fields.find(f => f.variable_name === 'user_id')?.value || null;
     }
 
-    try {
-      // 1. Skip if already processed
-      const { data: existingPayment } = await supabase
-        .from('payments')
-        .select('id, status')
-        .eq('transaction_id', reference)
-        .maybeSingle();
-
-      if (existingPayment && existingPayment.status === 'verified') {
-        return; // Already verified by frontend popup
-      }
-
-      // 2. Fetch User Student Data
-      if (userId) {
-        const { data: s } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
-        student = s;
-      } else {
-        // Fallback: match by email if user_id is missing
-        const { data: s } = await supabase.from('students').select('*').eq('email', data.customer.email).maybeSingle();
-        student = s;
-      }
-
-      // 3. Fetch Event
-      if (eventId) {
-        const { data: ev } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle();
-        targetEvent = ev;
-      }
-
-      // 4. Save to payments table
-      let paymentRecord;
-      if (!existingPayment) {
-        const { data: newPay, error: pErr } = await supabase.from('payments').insert([{
-          user_id: userId || student?.user_id || null,
-          amount: amountPaid,
-          payment_type: eventId ? 'event_registration' : 'other',
-          transaction_id: reference,
-          payment_proof_url: `https://dashboard.paystack.com/#/search?q=${encodeURIComponent(reference)}`,
-          description: targetEvent ? `Online payment for event: ${targetEvent.title}` : 'Paystack online payment',
-          event_id: eventId || null,
-          status: 'verified',
-          verified_by: null,
-          verified_at: new Date().toISOString(),
-          submitted_at: new Date().toISOString(),
-          notes: 'Verified via Paystack Webhook'
-        }]).select().single();
-        if (pErr) throw pErr;
-        paymentRecord = newPay;
-      } else {
-        const { data: updPay, error: uErr } = await supabase.from('payments').update({
-          status: 'verified',
-          verified_at: new Date().toISOString(),
-          notes: 'Verified via Paystack Webhook'
-        }).eq('id', existingPayment.id).select().single();
-        if (uErr) throw uErr;
-        paymentRecord = updPay;
-      }
-
-      // 5. Register Student for Event
-      if (targetEvent && (userId || student?.user_id)) {
-        ticketNumber = 'NACOS-' + targetEvent.id.substring(0, 4).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
-        
-        await supabase.from('event_registrations').upsert([{
-          event_id: targetEvent.id,
-          user_id: userId || student?.user_id,
-          registration_date: new Date().toISOString(),
-          status: 'registered',
-          linked_payment_id: paymentRecord.id
-        }], { onConflict: 'event_id,user_id' });
-      }
-
-      // 6. Sync to payment_verification for dashboard
-      try {
-        await supabase.from('payment_verification').insert([{
-          student_id: student?.id || null,
-          event_id: targetEvent?.id || null,
-          amount: amountPaid,
-          payment_reference: reference,
-          status: 'verified',
-          created_at: new Date().toISOString()
-        }]);
-      } catch (e) {
-        /* Ignore unique constraint / sync errors */
-      }
-
-      // 7. Send Emails
-      if (student && student.email && targetEvent && ticketNumber) {
-        await sendEventTicketEmail({
-          student,
-          event: targetEvent,
-          ticketNumber,
-          payment: paymentRecord
-        });
-      }
-
-      await sendPaymentAdminNotificationEmail({
-        student: student || { name: 'Student', email: data.customer.email },
-        event: targetEvent,
-        payment: paymentRecord,
-        ticketNumber
-      });
-
-    } catch (err) {
-      console.error('[Webhook Error] Processing Paystack charge.success:', err);
-    }
+    const result = await settleWebhookPayment({
+      reference: String(data.reference),
+      amountNaira: Number(data.amount) / 100, // kobo -> Naira
+      currency: data.currency || 'NGN',
+      customerEmail: data.customer?.email,
+      hintedEventId,
+      hintedUserId,
+      source: 'Paystack webhook'
+    });
+    console.log('[Paystack Webhook] Settled', data.reference, JSON.stringify(result));
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error('[Webhook Error] Processing Paystack charge.success:', err);
+    return res.status(500).send('Processing error; please retry');
   }
 });
+
+/**
+ * Record a gateway-confirmed payment from a webhook and, when the payment is
+ * tied to an event and covers its fee, issue the ticket. Idempotent.
+ *
+ * The owner and event come from the server-recorded checkout row when one
+ * exists (created by /bachs-session); webhook payload hints are only used as a
+ * fallback. Underpaid payments are recorded as `pending` for admin review and
+ * no ticket is issued.
+ */
+async function settleWebhookPayment({ reference, amountNaira, currency, customerEmail, hintedEventId = null, hintedUserId = null, source }) {
+  if (!reference || reference === 'undefined') throw new Error('Webhook payload has no reference');
+
+  const { data: existing, error: existingErr } = await supabase
+    .from('payments')
+    .select('*')
+    .eq('transaction_id', reference)
+    .maybeSingle();
+  if (existingErr) throw existingErr;
+
+  if (existing && existing.status === 'rejected') {
+    return { action: 'skipped', reason: 'payment previously rejected by an admin' };
+  }
+
+  // Resolve owner
+  let userId = existing?.user_id || hintedUserId || null;
+  if (!userId && customerEmail) {
+    const { data: matched } = await supabase
+      .from('students')
+      .select('user_id')
+      .eq('email', String(customerEmail).toLowerCase().trim())
+      .maybeSingle();
+    userId = matched?.user_id || null;
+  }
+
+  // Resolve event and its authoritative price
+  let targetEvent = null;
+  let expected = null;
+  const eventId = existing?.event_id || hintedEventId || null;
+  if (eventId) {
+    const payable = await loadPayableEvent(eventId);
+    if (!payable.error) {
+      targetEvent = payable.event;
+      expected = payable.price;
+    }
+  }
+
+  const amountOk = Number.isFinite(amountNaira) && String(currency || 'NGN').toUpperCase() === 'NGN';
+  const underpaid = !!targetEvent && (!amountOk || amountNaira + 0.01 < expected);
+  const now = new Date().toISOString();
+  const notes = underpaid
+    ? `${source}: UNDERPAID or unreadable amount (paid ${amountNaira} ${currency}, expected ${expected} NGN). Needs admin review; no ticket issued.`
+    : `Verified via ${source}`;
+
+  let payment = existing;
+  if (!existing) {
+    const { data: inserted, error: insErr } = await supabase
+      .from('payments')
+      .insert([{
+        user_id: userId,
+        event_id: targetEvent ? targetEvent.id : null,
+        amount: Number.isFinite(amountNaira) ? amountNaira : 0,
+        payment_type: targetEvent ? 'event_registration' : 'other',
+        transaction_id: reference,
+        payment_proof_url: receiptUrlFor(reference),
+        description: targetEvent ? `Online payment for event: ${targetEvent.title}` : `Online payment (${source})`,
+        status: underpaid ? 'pending' : 'verified',
+        verified_at: underpaid ? null : now,
+        submitted_at: now,
+        notes: userId ? notes : `${notes} (no matching student for email: ${customerEmail || 'unknown'})`
+      }])
+      .select()
+      .single();
+    if (insErr) throw insErr; // e.g. unique violation racing a verify call -> 500 -> gateway retries
+    payment = inserted;
+  } else if (existing.status !== 'verified') {
+    const { data: updated, error: updErr } = await supabase
+      .from('payments')
+      .update({
+        user_id: existing.user_id || userId,
+        amount: Number.isFinite(amountNaira) ? amountNaira : existing.amount,
+        status: underpaid ? 'pending' : 'verified',
+        verified_at: underpaid ? null : now,
+        notes
+      })
+      .eq('id', existing.id)
+      .neq('status', 'verified')
+      .select()
+      .maybeSingle();
+    if (updErr) throw updErr;
+    if (updated) payment = updated;
+    else {
+      // Settled concurrently by the student's verify call; re-read.
+      const { data: fresh } = await supabase.from('payments').select('*').eq('id', existing.id).maybeSingle();
+      payment = fresh || existing;
+    }
+  }
+
+  if (underpaid) {
+    console.warn(`[payments] ${source}: underpaid ${reference} (paid ${amountNaira}, expected ${expected}).`);
+    return { action: 'recorded_underpaid', payment_id: payment.id };
+  }
+
+  if (targetEvent && payment.user_id && payment.status === 'verified') {
+    const { ticketNumber, newlyIssued } = await issueEventTicket({ payment, event: targetEvent, userId: payment.user_id });
+    if (newlyIssued) {
+      await auditLog({
+        action: 'webhook_payment_verified',
+        userId: payment.user_id,
+        details: { payment_id: payment.id, amount: payment.amount, reference, event_id: targetEvent.id, ticket_number: ticketNumber, source },
+        ip: null
+      });
+    }
+    return { action: newlyIssued ? 'ticket_issued' : 'already_issued', payment_id: payment.id, ticket_number: ticketNumber };
+  }
+
+  return { action: 'recorded', payment_id: payment.id, has_event: !!targetEvent, has_user: !!payment.user_id };
+}
 
 module.exports = router;

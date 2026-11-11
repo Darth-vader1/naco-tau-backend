@@ -1,5 +1,15 @@
 // server.js
 require('dotenv').config();
+
+// SECURITY: a Vercel production deployment must always run in production mode.
+// A misconfigured NODE_ENV (e.g. "development") silently disables every
+// production-only guard: payment simulation blocks, stack-trace redaction in
+// error responses, and removal of localhost CORS origins.
+if (process.env.VERCEL_ENV === 'production' && process.env.NODE_ENV !== 'production') {
+  console.warn(`[startup] NODE_ENV was "${process.env.NODE_ENV}" on a Vercel production deployment; forcing "production".`);
+  process.env.NODE_ENV = 'production';
+}
+
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
