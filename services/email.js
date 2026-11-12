@@ -1,6 +1,7 @@
 // backend/services/email.js
 const nodemailer = require('nodemailer');
 const { supabase } = require('../config/supabase');
+const { formatPrizePool: formatPrizeText } = require('../utils/prizeFormat');
 
 // ============================================
 // INITIALIZE NODEMAILER (SMTP)
@@ -393,13 +394,10 @@ function formatNaira(amount) {
     return '₦' + num.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// Formats every naira amount inside free-text prize descriptions
+// ("N300,000 (1st: 150k)" -> "₦300,000 (1st: ₦150,000)"). Shared with the frontend.
 function formatPrizePool(prize) {
-    if (!prize) return 'Prizes & Recognition';
-    const str = String(prize).trim();
-    if (/^\d+(\.\d+)?$/.test(str)) {
-        return '₦' + Number(str).toLocaleString('en-NG');
-    }
-    return str;
+    return formatPrizeText(prize, { fallback: 'Prizes & Recognition' });
 }
 
 function renderBaseLayout({
@@ -782,7 +780,7 @@ function triggerAutoContentBroadcast(contentType, itemData, options = {}) {
         case 'hackathons':
             templateType = 'new_hackathon';
             const typeUpper = (itemData.event_type || 'Competition').toUpperCase();
-            const prizeSnippet = itemData.prize_pool ? ` (${itemData.prize_pool})` : '';
+            const prizeSnippet = itemData.prize_pool ? ` (${formatPrizeText(itemData.prize_pool)})` : '';
             subject = `🏆 New ${typeUpper}: ${itemData.title || 'Challenge Announced'}${prizeSnippet}`;
             break;
         default:
