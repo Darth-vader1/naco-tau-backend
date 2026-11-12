@@ -431,19 +431,19 @@ function renderBaseLayout({
         body { margin: 0; padding: 0; background-color: #f4f7f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #2d3748; line-height: 1.6; }
         .wrapper { width: 100%; background-color: #f4f7f6; padding: 30px 15px; box-sizing: border-box; }
         .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
-        .header { background: linear-gradient(135deg, #1b8c0c 0%, #136308 100%); padding: 32px 24px; text-align: center; color: #ffffff; }
+        .header { background: linear-gradient(135deg, #157a09 0%, #136308 100%); padding: 32px 24px; text-align: center; color: #ffffff; }
         .badge-pill { display: inline-block; background: rgba(255,255,255,0.22); padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #ffffff; margin-bottom: 10px; }
         .header h1 { margin: 0; font-size: 22px; font-weight: 700; color: #ffffff; }
         .header p { margin: 6px 0 0; font-size: 13px; opacity: 0.92; color: #e8f5e9; }
         .body-content { padding: 32px 28px; }
         .title { color: #0f172a; font-size: 19px; font-weight: 700; margin: 0 0 16px; }
         .info-table { width: 100%; border-collapse: collapse; margin: 18px 0; background: #f8fafc; border-radius: 8px; overflow: hidden; }
-        .badge { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #e8f5e9; color: #1b8c0c; }
+        .badge { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #e8f5e9; color: #157a09; }
         .badge-prize { background: #fef3c7; color: #b45309; font-weight: 700; font-size: 12px; }
         .badge-alert { background: #fee2e2; color: #b91c1c; font-weight: 600; font-size: 12px; }
-        .desc-box { background: #f8fafc; border-left: 4px solid #1b8c0c; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #4a5568; border-radius: 0 6px 6px 0; line-height: 1.5; }
+        .desc-box { background: #f8fafc; border-left: 4px solid #157a09; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #4a5568; border-radius: 0 6px 6px 0; line-height: 1.5; }
         .btn-wrapper { text-align: center; margin: 28px 0 16px; }
-        .btn { display: inline-block; background-color: #1b8c0c; color: #ffffff !important; padding: 13px 30px; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; box-shadow: 0 4px 12px rgba(27,140,12,0.3); }
+        .btn { display: inline-block; background-color: #157a09; color: #ffffff !important; padding: 13px 30px; font-size: 14px; font-weight: 600; text-decoration: none; border-radius: 8px; box-shadow: 0 4px 12px rgba(27,140,12,0.3); }
         .footer { text-align: center; color: #718096; font-size: 12px; padding: 22px 20px 0; border-top: 1px solid #edf2f7; margin-top: 24px; }
         .footer p { margin: 4px 0; }
     </style>
@@ -465,7 +465,7 @@ function renderBaseLayout({
                 </div>
                 ${noticeText ? `<p style="color: #64748b; font-size: 13px; text-align: center; margin-top: 20px;">${noticeText}</p>` : ''}
                 <div class="footer">
-                    <p style="font-weight: 600; color: #475569;">Nigerian Association of Computing Students (NACOS)</p>
+                    <p style="font-weight: 600; color: #475569;">Nigeria Association of Computing Students (NACOS)</p>
                     <p>Thomas Adewumi University Chapter • Oko-Irese, Kwara State</p>
                     <p style="color: #94a3b8; font-size: 11px; margin-top: 8px;">You received this notification because you are an active student member of NACOS TAU.</p>
                 </div>
@@ -647,7 +647,7 @@ function getEmailTemplate(type, data = {}) {
             const prize = item.prize_pool ? `<span class="badge badge-prize">${formatPrizePool(item.prize_pool)}</span>` : 'Prizes & Recognition';
             const actionUrl = `${FRONTEND_URL}/hackathons.html`;
             const desc = item.description ? `<div class="desc-box">${item.description}</div>` : '';
-            const tagline = item.tagline ? `<p style="margin: 0 0 12px; font-weight: 600; color: #1b8c0c; font-size: 15px;">${item.tagline}</p>` : '';
+            const tagline = item.tagline ? `<p style="margin: 0 0 12px; font-weight: 600; color: #157a09; font-size: 15px;">${item.tagline}</p>` : '';
 
             const deadlineStr = item.registration_deadline
                 ? new Date(item.registration_deadline).toLocaleDateString('en-NG', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -836,10 +836,10 @@ async function sendWelcomeEmail({ student }) {
 
         const metaRows = [
             { label: 'Full Name',   value: `<strong>${fullName}</strong>` },
-            { label: 'Matric No',   value: `<code style="background:#f1f5f9; padding:2px 8px; border-radius:4px; font-size:13px; font-weight:700; color:#1b8c0c;">${matricNo}</code>` },
+            { label: 'Matric No',   value: `<code style="background:#f1f5f9; padding:2px 8px; border-radius:4px; font-size:13px; font-weight:700; color:#157a09;">${matricNo}</code>` },
             { label: 'Department',  value: department },
             { label: 'Email',       value: student.email },
-            { label: 'Status',      value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">✓ Active</span>` },
+            { label: 'Status',      value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">✓ Active</span>` },
         ];
 
         const extraHtml = `
@@ -864,20 +864,20 @@ async function sendWelcomeEmail({ student }) {
         const html = renderBaseLayout({
             headerBadge:    'Welcome to NACOS TAU',
             headerTitle:    `Welcome, ${firstName}! 🎉`,
-            headerSubtitle: 'Nigerian Association of Computing Students — TAU Chapter',
+            headerSubtitle: 'Nigeria Association of Computing Students — TAU Chapter',
             contentTitle:   'Your account is ready',
             metaRows,
             extraHtml,
             buttonText:  'Go to My Dashboard',
             buttonUrl:   dashboardUrl,
-            noticeText:  `Need help? Reach us at nacos@tau.edu.ng or visit <a href="${portalUrl}" style="color:#1b8c0c;">nacosportal.vercel.app</a>`
+            noticeText:  `Need help? Reach us at nacos@tau.edu.ng or visit <a href="${portalUrl}" style="color:#157a09;">nacosportal.vercel.app</a>`
         });
 
         const emailRes = await sendEmail({
             to:      student.email,
             subject: `🎉 Welcome to NACOS TAU, ${firstName}! Your account is active`,
             html,
-            text: `Hi ${firstName},\n\nWelcome to the Nigerian Association of Computing Students, Thomas Adewumi University Chapter!\n\nYour account is now active.\nMatric No: ${matricNo}\nDepartment: ${department}\n\nVisit your dashboard: ${dashboardUrl}\n\nNACOS TAU Chapter`
+            text: `Hi ${firstName},\n\nWelcome to the Nigeria Association of Computing Students, Thomas Adewumi University Chapter!\n\nYour account is now active.\nMatric No: ${matricNo}\nDepartment: ${department}\n\nVisit your dashboard: ${dashboardUrl}\n\nNACOS TAU Chapter`
         });
 
         try {
@@ -929,7 +929,7 @@ async function sendNewStudentAdminNotification({ student }) {
             contentTitle:   'New member joined NACOS TAU',
             metaRows,
             extraHtml: `
-                <div style="background:#f8fafc; border-left:4px solid #1b8c0c; padding:12px 16px; margin:18px 0; font-size:14px; color:#334155; border-radius:0 6px 6px 0;">
+                <div style="background:#f8fafc; border-left:4px solid #157a09; padding:12px 16px; margin:18px 0; font-size:14px; color:#334155; border-radius:0 6px 6px 0;">
                     This student self-registered through the NACOS portal. A verification code has been dispatched to their email.
                 </div>
             `,
@@ -971,7 +971,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
         const unitStr = qty > 1 && payment?.amount ? ` (${qty} × ${formatNaira(Number(payment.amount) / qty)})` : '';
 
         const metaRows = [
-            { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #1b8c0c; letter-spacing: 1px;">${ticketNumber}</strong>` },
+            { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #157a09; letter-spacing: 1px;">${ticketNumber}</strong>` },
             { label: 'Event', value: `<strong>${eventTitle}</strong>` },
             { label: 'Ticket Holder', value: studentName },
             { label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` },
@@ -979,7 +979,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             { label: 'Date', value: dateStr },
             { label: 'Time', value: timeStr },
             { label: 'Location / Venue', value: locationStr },
-            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">${amountStr}</span>${unitStr}` },
+            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${unitStr}` },
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
@@ -1048,7 +1048,7 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
         const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
 
         const metaRows = [
-            { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #1b8c0c;">${amountStr}</strong>` },
+            { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #157a09;">${amountStr}</strong>` },
             { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
             ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && payment?.amount ? ` × ${formatNaira(Number(payment.amount) / qty)} each` : ''}` }] : []),
             { label: 'Student / Payer', value: studentName + (student?.is_guest || payment?.guest_email ? ' <span class="badge" style="background:#fff7ed; color:#9a3412; font-weight:700;">Guest (non-member)</span>' : '') },
@@ -1059,7 +1059,7 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             ...(ticketNumber ? [{ label: 'Ticket Issued', value: `<code>${ticketNumber}</code>` }] : []),
             { label: 'Bachs Ref', value: `<code>${refStr}</code>` },
             { label: 'Payment Time', value: dateStr },
-            { label: 'Gateway Status', value: `<span class="badge" style="background:#e8f5e9; color:#1b8c0c; font-weight:700;">Verified (Bachs)</span>` }
+            { label: 'Gateway Status', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">Verified (Bachs)</span>` }
         ];
 
         const html = renderBaseLayout({
@@ -1069,7 +1069,7 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             contentTitle: `${amountStr} Received via Bachs`,
             metaRows,
             extraHtml: `
-                <div style="background: #f8fafc; border-left: 4px solid #1b8c0c; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #334155;">
+                <div style="background: #f8fafc; border-left: 4px solid #157a09; padding: 12px 16px; margin: 18px 0; font-size: 14px; color: #334155;">
                     This payment was automatically verified by the Bachs payment gateway and recorded in the database.
                 </div>
             `,
