@@ -31,6 +31,31 @@ const isPaymentSimulationAllowed = () =>
 
 const isBachsKeyConfigured = (key) => !!key && !key.includes('placeholder');
 
+// ---- Gateway response helpers ----------------------------------------------
+// Bachs (like most gateways) reports state in several fields and uses
+// different words for "paid" (e.g. status "complete" + payment_status "paid").
+// A payment counts as paid if ANY status field says so.
+const PAID_STATES = new Set(['completed', 'complete', 'success', 'successful', 'succeeded', 'paid', 'captured', 'settled']);
+const statusFieldsOf = (obj = {}) =>
+  [obj.status, obj.payment_status, obj.paymentStatus, obj.state, obj.charge?.status, obj.payment?.status]
+    .filter(v => typeof v === 'string' && v.trim())
+    .map(v => v.trim().toLowerCase());
+const isGatewayPaid = (obj = {}) => obj.paid === true || statusFieldsOf(obj).some(s => PAID_STATES.has(s));
+const describeGatewayStatus = (obj = {}) => statusFieldsOf(obj).join('/');
+
+// Every identifier a gateway object may carry. Checkout-session IDs come first:
+// they are what our server records when a checkout starts (chk_...), while
+// "id" on a payment/charge event is the charge ID (ch_...).
+const gatewayIdsOf = (obj = {}) => {
+  const ids = [
+    obj.checkout_id, obj.checkout_session_id, obj.checkoutSessionId, obj.session_id,
+    obj.checkout?.id, obj.checkout_session?.id, obj.session?.id,
+    obj.metadata?.checkout_id, obj.metadata?.checkout_session_id,
+    obj.id, obj.reference, obj.payment_id, obj.charge_id, obj.charge?.id, obj.code
+  ];
+  return [...new Set(ids.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+};
+
 // Constant-time string comparison (returns false on length mismatch).
 const safeEqual = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -685,13 +710,10 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
     }
 
     const sessionObj = verifyData?.data || verifyData || {};
-    const sessionStatus = String(sessionObj.status || sessionObj.payment_status || sessionObj.state || '').toLowerCase();
-    const isPaidOrCompleted =
-      sessionStatus === 'completed' ||
-      sessionStatus === 'success' ||
-      sessionStatus === 'successful' ||
-      sessionStatus === 'paid' ||
-      sessionObj.paid === true;
+    const sessionStatus = describeGatewayStatus(sessionObj);
+    const isPaidOrCompleted = isGatewayPaid(sessionObj);
+    // IDs/status only (no customer data) so failed confirmations can be diagnosed from the logs.
+    console.log(`[Bachs] verify ${reference}: http=${verifyRes ? verifyRes.status : 'none'} status=${sessionStatus || 'none'} paid=${isPaidOrCompleted} ids=${gatewayIdsOf(sessionObj).join(',')}`);
 
     if (!verifyRes || !verifyRes.ok || !isPaidOrCompleted) {
       if (isPaymentSimulationAllowed()) {
@@ -1051,6 +1073,122 @@ const publicEventSummary = (ev) => ev ? {
   public_price: ev.public_price
 } : null;
 
+/**
+ * Confirm a server-recorded online order (member or guest) with the gateway,
+ * using the checkout ID we saved when it started, then issue its tickets.
+ * Idempotent: an already-verified order just returns its ticket.
+ *
+ * Returns { ok: true, settled, ticketNumber, newlyIssued } or { ok: false, status, error }.
+ */
+async function confirmOnlineOrder({ payment, event, source }) {
+  const quantity = quantityOf(payment);
+  let settled = payment;
+
+  if (payment.status !== 'verified') {
+    // Seats were checked at checkout; re-check only if this order has no tickets yet.
+    const { data: orderReg } = await supabase.from('event_registrations').select('id').eq('linked_payment_id', payment.id).limit(1);
+    if (!(Array.isArray(orderReg) && orderReg.length)) {
+      const remaining = await seatsRemaining(event);
+      if (quantity > remaining) {
+        return { ok: false, status: 409, error: 'This event filled up before the payment was confirmed. Please contact the organisers for a refund.' };
+      }
+    }
+
+    let expectedEmail = payment.guest_email || null;
+    if (!expectedEmail && payment.user_id) {
+      const { data: st } = await supabase.from('students').select('email').eq('user_id', payment.user_id).maybeSingle();
+      expectedEmail = st?.email || null;
+    }
+
+    const gw = await checkGatewayPayment({
+      reference: payment.transaction_id,
+      expectedAmount: Number(payment.amount),
+      expectedEmail,
+      logContext: `${source}, order ${payment.id}`
+    });
+    if (!gw.ok) return { ok: false, status: gw.status, error: gw.error };
+
+    const tag = payment.guest_email && !payment.user_id ? '[guest] ' : '';
+    const { data: updated, error: updErr } = await supabase
+      .from('payments')
+      .update({
+        amount: gw.data.amount / 100,
+        status: 'verified',
+        verified_at: new Date().toISOString(),
+        notes: `${tag}Verified via Bachs ${source} (${gw.data.channel || 'online checkout'})`
+      })
+      .eq('id', payment.id)
+      .neq('status', 'verified')
+      .select()
+      .maybeSingle();
+    if (updErr) throw updErr;
+    if (updated) {
+      settled = updated;
+    } else {
+      const { data: fresh } = await supabase.from('payments').select('*').eq('id', payment.id).maybeSingle();
+      settled = fresh || payment;
+    }
+  }
+
+  const { ticketNumber, newlyIssued } = await issueEventTicket({ payment: settled, event });
+  return { ok: true, settled, ticketNumber, newlyIssued };
+}
+
+// ============================================
+// ADMIN: RE-CHECK AN ONLINE CHECKOUT WITH THE GATEWAY
+// ============================================
+// Online checkouts can't be approved by hand (an unpaid one looks the same as
+// a paid one). This asks Bachs directly, using the checkout ID recorded when
+// the checkout started, and issues the tickets if it is paid in full.
+router.post('/:id/gateway-recheck', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return errorResponse(res, 'Invalid payment id', 400);
+
+    const { data: payment, error } = await supabase.from('payments').select('*').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!payment) return errorResponse(res, 'Payment not found', 404);
+    if (!payment.transaction_id || !payment.event_id) {
+      return errorResponse(res, 'This payment has no gateway checkout to re-check.', 400);
+    }
+    if (payment.status === 'rejected') {
+      return errorResponse(res, 'This payment was rejected.', 409);
+    }
+
+    const { data: event, error: evErr } = await supabase.from('events').select('*').eq('id', payment.event_id).maybeSingle();
+    if (evErr) throw evErr;
+    if (!event) return errorResponse(res, 'Linked event not found.', 404);
+
+    const outcome = await confirmOnlineOrder({ payment, event, source: 'admin re-check' });
+    if (!outcome.ok) return errorResponse(res, outcome.error, outcome.status);
+
+    await auditLog({
+      action: 'payment_gateway_rechecked',
+      userId: req.userId,
+      details: {
+        payment_id: payment.id,
+        reference: payment.transaction_id,
+        ticket_number: outcome.ticketNumber,
+        ticket_quantity: quantityOf(outcome.settled),
+        newly_issued: outcome.newlyIssued
+      },
+      ip: req.ip
+    });
+
+    return successResponse(res, {
+      payment: outcome.settled,
+      ticket_number: outcome.ticketNumber,
+      ticket_quantity: quantityOf(outcome.settled),
+      newly_issued: outcome.newlyIssued
+    }, outcome.newlyIssued
+      ? 'Payment confirmed by the gateway. Ticket issued and emailed.'
+      : 'Payment already confirmed. Ticket was issued earlier.');
+  } catch (err) {
+    console.error('Admin gateway re-check error:', err);
+    return errorResponse(res, 'Could not re-check this payment. Please try again.', 500);
+  }
+});
+
 router.post('/guest-session', guestLimiter, async (req, res) => {
   try {
     const { event_id } = req.body || {};
@@ -1206,48 +1344,9 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
     if (!event) return errorResponse(res, 'Event not found.', 404);
 
     const quantity = quantityOf(payment);
-    let settled = payment;
-
-    if (payment.status !== 'verified') {
-      // Seats were checked at checkout; re-check only if this order has no tickets yet.
-      const { data: orderReg } = await supabase.from('event_registrations').select('id').eq('linked_payment_id', payment.id).limit(1);
-      if (!(Array.isArray(orderReg) && orderReg.length)) {
-        const remaining = await seatsRemaining(event);
-        if (quantity > remaining) {
-          return errorResponse(res, 'This event filled up before your payment was confirmed. Please contact the organisers for a refund.', 409);
-        }
-      }
-
-      const gw = await checkGatewayPayment({
-        reference,
-        expectedAmount: Number(payment.amount),
-        expectedEmail: payment.guest_email,
-        logContext: `guest order ${payment.id}`
-      });
-      if (!gw.ok) return errorResponse(res, gw.error, gw.status);
-
-      const { data: updated, error: updErr } = await supabase
-        .from('payments')
-        .update({
-          amount: gw.data.amount / 100,
-          status: 'verified',
-          verified_at: new Date().toISOString(),
-          notes: `[guest] Verified via Bachs (${gw.data.channel || 'online checkout'})`
-        })
-        .eq('id', payment.id)
-        .neq('status', 'verified')
-        .select()
-        .maybeSingle();
-      if (updErr) throw updErr;
-      if (updated) {
-        settled = updated;
-      } else {
-        const { data: fresh } = await supabase.from('payments').select('*').eq('id', payment.id).maybeSingle();
-        settled = fresh || payment;
-      }
-    }
-
-    const { ticketNumber, newlyIssued } = await issueEventTicket({ payment: settled, event });
+    const outcome = await confirmOnlineOrder({ payment, event, source: 'guest lookup' });
+    if (!outcome.ok) return errorResponse(res, outcome.error, outcome.status);
+    const { settled, ticketNumber, newlyIssued } = outcome;
 
     if (newlyIssued) {
       await auditLog({
@@ -1743,17 +1842,34 @@ router.post('/webhook', async (req, res) => {
     // the gateway retries (settlement is idempotent).
     try {
       const bData = event.data || event;
-      const ref = bData.id || bData.checkout_id || bData.reference || bData.code;
-      const status = String(bData.status || bData.state || event.type || '').toLowerCase();
+      const eventType = String(event.type || event.event || '').toLowerCase();
+      const candidateIds = gatewayIdsOf(bData);
+      const paid = isGatewayPaid(bData) || /(completed|succeeded|success|paid)$/.test(eventType);
 
-      if (ref && (status.includes('completed') || status.includes('success') || status.includes('paid'))) {
-        const rawAmt = bData.pricing?.amount ?? bData.amount;
+      // Match on whichever identifier we recorded when the checkout started
+      // (the checkout ID), not just the event's own id (often the charge ID).
+      let ref = null;
+      if (candidateIds.length) {
+        const { data: matches, error: matchErr } = await supabase
+          .from('payments')
+          .select('transaction_id')
+          .in('transaction_id', candidateIds);
+        if (matchErr) throw matchErr;
+        const known = new Set((matches || []).map(m => m.transaction_id));
+        ref = candidateIds.find(id => known.has(id)) || candidateIds[0];
+      }
+      const chargeId = candidateIds.find(id => id !== ref) || null;
+
+      console.log(`[Bachs Webhook] type=${eventType || 'none'} status=${describeGatewayStatus(bData) || 'none'} paid=${paid} ids=${candidateIds.join(',')} matched=${ref || 'none'}`);
+
+      if (ref && paid) {
+        const rawAmt = bData.pricing?.amount ?? bData.amount_paid ?? bData.amount;
         const result = await settleWebhookPayment({
           reference: String(ref),
           amountNaira: parseFloat(rawAmt),
           currency: bData.pricing?.currency || bData.currency || 'NGN',
           customerEmail: bData.customer?.email || event.customer?.email || bData.metadata?.email,
-          source: 'Bachs webhook'
+          source: chargeId ? `Bachs webhook (gateway ref ${chargeId})` : 'Bachs webhook'
         });
         console.log('[Bachs Webhook] Settled', ref, JSON.stringify(result));
       }
