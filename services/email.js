@@ -968,7 +968,16 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
         const ticketUrl = `${FRONTEND_URL}/events.html`;
         const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
         const admitStr = `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
-        const unitStr = qty > 1 && payment?.amount ? ` (${qty} × ${formatNaira(Number(payment.amount) / qty)})` : '';
+        const subtotalNum = Number(payment?.subtotal_amount ?? payment?.amount ?? 0);
+        const serviceFeeNum = Number(payment?.service_fee || 0);
+        const gatewayFeeNum = payment?.gateway_fee != null ? Number(payment.gateway_fee) : 0;
+        const unitStr = qty > 1 && subtotalNum ? ` (${qty} × ${formatNaira(subtotalNum / qty)})` : '';
+        const feeRows = [
+            ...(serviceFeeNum > 0 ? [{ label: 'Tickets', value: `${formatNaira(subtotalNum)}${unitStr}` }, { label: 'Service Fee', value: formatNaira(serviceFeeNum) }] : []),
+            ...(gatewayFeeNum > 0 ? [{ label: 'Bachs Processing Fee', value: `${formatNaira(gatewayFeeNum)} (paid at checkout)` }] : [])
+        ];
+        const feeText = (serviceFeeNum > 0 ? `\nTickets: ${formatNaira(subtotalNum)}\nService Fee: ${formatNaira(serviceFeeNum)}` : '') +
+            (gatewayFeeNum > 0 ? `\nBachs Processing Fee: ${formatNaira(gatewayFeeNum)}` : '');
 
         const metaRows = [
             { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #157a09; letter-spacing: 1px;">${ticketNumber}</strong>` },
@@ -979,7 +988,8 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             { label: 'Date', value: dateStr },
             { label: 'Time', value: timeStr },
             { label: 'Location / Venue', value: locationStr },
-            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${unitStr}` },
+            ...feeRows,
+            { label: serviceFeeNum > 0 ? 'Total Paid' : 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${serviceFeeNum > 0 ? '' : unitStr}` },
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
@@ -1007,7 +1017,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
-            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nTickets: ${qty} (${admitStr})\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}${unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
+            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nTickets: ${qty} (${admitStr})\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}${feeText}\nTotal Paid: ${amountStr}${serviceFeeNum > 0 ? '' : unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
 
         try {
@@ -1050,7 +1060,12 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
         const metaRows = [
             { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #157a09;">${amountStr}</strong>` },
             { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
-            ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && payment?.amount ? ` × ${formatNaira(Number(payment.amount) / qty)} each` : ''}` }] : []),
+            ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && (payment?.subtotal_amount ?? payment?.amount) ? ` × ${formatNaira(Number(payment.subtotal_amount ?? payment.amount) / qty)} each` : ''}` }] : []),
+            ...(Number(payment?.service_fee || 0) > 0 ? [
+                { label: 'Ticket Revenue', value: formatNaira(Number(payment.subtotal_amount ?? payment.amount)) },
+                { label: 'Service Fee', value: formatNaira(Number(payment.service_fee)) }
+            ] : []),
+            ...(payment?.gateway_fee != null && Number(payment.gateway_fee) > 0 ? [{ label: 'Bachs Fee (paid by buyer)', value: formatNaira(Number(payment.gateway_fee)) }] : []),
             { label: 'Student / Payer', value: studentName + (student?.is_guest || payment?.guest_email ? ' <span class="badge" style="background:#fff7ed; color:#9a3412; font-weight:700;">Guest (non-member)</span>' : '') },
             ...(payment?.guest_phone ? [{ label: 'Guest Phone', value: payment.guest_phone }] : []),
             ...(student?.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),

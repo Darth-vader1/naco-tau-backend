@@ -47,6 +47,7 @@
 | 020 | `020_close_student_pii_and_payment_replay.sql` | Drop `students_directory_read` (PII leak), `security_invoker` on level view, unique `payments.transaction_id` | ⬜ Pending — run in Supabase SQL Editor |
 | 021 | `021_event_ticket_quantity.sql` | `ticket_quantity` on payments + event_registrations; create + re-sync `events.current_attendees` in tickets | ⬜ Pending — run BEFORE deploying the multi-ticket code |
 | 022 | `022_repeat_orders_and_guest_checkout.sql` | `allow_repeat_orders`, `open_to_public`, `public_price` on events; one registration per order; guest buyer columns | ⬜ Pending — run after 021, BEFORE deploying |
+| 023 | `023_ticket_fees.sql` | `fee_settings` (service fee per ticket, buyer pays Bachs fee); `events.service_fee_override`; payment breakdown columns (`subtotal_amount`, `service_fee`, `gateway_fee`) | ⬜ Pending — run BEFORE deploying the ticket-fees code |
 
 ---
 

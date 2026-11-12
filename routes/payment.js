@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../config/supabase');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
@@ -16,6 +16,14 @@ const {
   seatsRemaining,
   syncAttendeeCount
 } = require('../utils/tickets');
+const {
+  getFeeSettings,
+  invalidateFeeSettings,
+  serviceFeePerTicket,
+  orderBreakdown,
+  gatewayFeeOf,
+  money
+} = require('../utils/fees');
 
 // ============================================
 // PAYMENT SAFETY HELPERS
@@ -279,7 +287,13 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       return errorResponse(res, payable.error, payable.status);
     }
     const unitPrice = payable.price;
-    const price = orderTotal(unitPrice, quantity); // total charged for this order
+    const feeSettings = await getFeeSettings();
+    const breakdown = orderBreakdown({
+      unitPrice,
+      quantity,
+      feePerTicket: serviceFeePerTicket(payable.event, feeSettings, { guest: false })
+    });
+    const price = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
 
     // One order per student per event unless the admin has switched on
     // "Allow repeat purchases" for this event (e.g. game night).
@@ -329,7 +343,9 @@ router.post('/bachs-session', authenticate, async (req, res) => {
         name: req.user?.name || 'Student'
       },
       success_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=success&event_id=${encodeURIComponent(event_id)}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`
+      cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`,
+      // Bachs adds its processing fee on top for the buyer, so NACOS receives the full amount.
+      ...(feeSettings.customer_bears_gateway_fee ? { customer_bears_fee: true } : {})
     };
 
     // Automatically determine base URL
@@ -384,6 +400,8 @@ router.post('/bachs-session', authenticate, async (req, res) => {
           user_id: req.userId,
           event_id: payable.event.id,
           amount: price,
+          subtotal_amount: breakdown.subtotal_amount,
+          service_fee: breakdown.service_fee,
           ticket_quantity: quantity,
           payment_type: 'event_registration',
           transaction_id: String(checkoutId),
@@ -408,7 +426,8 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       payment_id: paymentId,
       quantity,
       unit_price: unitPrice,
-      total_amount: price
+      ...breakdown,
+      gateway_fee_added_at_checkout: !!feeSettings.customer_bears_gateway_fee
     }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
@@ -611,7 +630,10 @@ router.get('/receipt/:reference', async (req, res) => {
     const publicPayload = {
       ticket_number: ticketNumber,
       ticket_quantity: ticketQuantity,
-      unit_price: Math.round((Number(payment.amount) / ticketQuantity) * 100) / 100,
+      unit_price: money(Number(payment.subtotal_amount ?? payment.amount) / ticketQuantity),
+      subtotal_amount: Number(payment.subtotal_amount ?? payment.amount),
+      service_fee: Number(payment.service_fee || 0),
+      gateway_fee: payment.gateway_fee != null ? Number(payment.gateway_fee) : null,
       status: payment.status,
       payment_type: payment.payment_type,
       amount: payment.amount,
@@ -757,7 +779,10 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
         currency,
         channel: sessionObj.mode || sessionObj.channel || 'online checkout',
         reference: sessionObj.id || sessionObj.checkout_id || sessionObj.reference || reference,
-        paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString()
+        paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString(),
+        // Bachs processing fee, if reported (naira), and who paid it
+        gateway_fee: gatewayFeeOf(sessionObj),
+        gateway_fee_paid_by: sessionObj.fee_paid_by || (sessionObj.customer_bears_fee === true ? 'customer' : null)
       }
     };
   } catch (err) {
@@ -838,11 +863,20 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
         return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
       }
     }
-    // A checkout recorded by the server is held to the total quoted when it
-    // started (so a later admin price change can't break a paid order).
-    const expectedAmount = (existingPayment && isOnlineCheckoutRow(existingPayment) && existingPayment.status === 'pending' && Number(existingPayment.amount) > 0)
-      ? Number(existingPayment.amount)
-      : orderTotal(unitPrice, quantity);
+    // A checkout recorded by the server is held to the total (tickets + service
+    // fee) quoted when it started, so a later price or fee change can't break a
+    // paid order. Without one, price it now with the current fee settings.
+    const fromRecordedCheckout = !!(existingPayment && isOnlineCheckoutRow(existingPayment) &&
+      existingPayment.status === 'pending' && Number(existingPayment.amount) > 0);
+    const feeSettings = await getFeeSettings();
+    const priced = fromRecordedCheckout
+      ? {
+          total_amount: money(existingPayment.amount),
+          subtotal_amount: money(existingPayment.subtotal_amount ?? existingPayment.amount),
+          service_fee: money(existingPayment.service_fee || 0)
+        }
+      : orderBreakdown({ unitPrice, quantity, feePerTicket: serviceFeePerTicket(targetEvent, feeSettings, { guest: false }) });
+    const expectedAmount = priced.total_amount;
 
     // Capacity check (skipped when this order already has its tickets, e.g. a retried verification)
     let alreadyIssued = false;
@@ -876,7 +910,15 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
     }
     const verifiedPaymentData = gw.data;
 
-    const paidAmount = verifiedPaymentData.amount / 100;
+    // Store our breakdown (tickets + service fee). The gateway's figure may
+    // include the Bachs fee the buyer paid on top, which is recorded separately.
+    const paidAmount = priced.total_amount;
+    const feeColumns = {
+      subtotal_amount: priced.subtotal_amount,
+      service_fee: priced.service_fee,
+      ...(verifiedPaymentData.gateway_fee != null ? { gateway_fee: verifiedPaymentData.gateway_fee } : {}),
+      ...(verifiedPaymentData.gateway_fee_paid_by ? { gateway_fee_paid_by: verifiedPaymentData.gateway_fee_paid_by } : {})
+    };
 
     // 4. Save/update payment record in database
     let paymentRecord = existingPayment;
@@ -887,6 +929,7 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
         .insert([{
           user_id: req.userId,
           amount: paidAmount,
+          ...feeColumns,
           ticket_quantity: quantity,
           payment_type: payment_type,
           transaction_id: reference,
@@ -916,6 +959,7 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
       if (paymentRecord.status !== 'verified') {
         Object.assign(updates, {
           amount: paidAmount,
+          ...feeColumns,
           status: 'verified',
           verified_by: req.userId,
           verified_at: new Date().toISOString(),
@@ -967,6 +1011,9 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
       ticket_quantity: quantityOf(registrationRecord || paymentRecord),
       unit_price: unitPrice,
       total_amount: Number(paymentRecord.amount),
+      subtotal_amount: Number(paymentRecord.subtotal_amount ?? paymentRecord.amount),
+      service_fee: Number(paymentRecord.service_fee || 0),
+      gateway_fee: paymentRecord.gateway_fee != null ? Number(paymentRecord.gateway_fee) : null,
       event: targetEvent ? {
         id: targetEvent.id,
         title: targetEvent.title,
@@ -1112,7 +1159,13 @@ async function confirmOnlineOrder({ payment, event, source }) {
     const { data: updated, error: updErr } = await supabase
       .from('payments')
       .update({
-        amount: gw.data.amount / 100,
+        // Keep the recorded breakdown (tickets + service fee); the Bachs fee the
+        // buyer paid on top is stored separately when Bachs reports it.
+        amount: money(payment.amount) > 0 ? money(payment.amount) : gw.data.amount / 100,
+        subtotal_amount: payment.subtotal_amount ?? money(payment.amount),
+        service_fee: money(payment.service_fee || 0),
+        ...(gw.data.gateway_fee != null ? { gateway_fee: gw.data.gateway_fee } : {}),
+        ...(gw.data.gateway_fee_paid_by ? { gateway_fee_paid_by: gw.data.gateway_fee_paid_by } : {}),
         status: 'verified',
         verified_at: new Date().toISOString(),
         notes: `${tag}Verified via Bachs ${source} (${gw.data.channel || 'online checkout'})`
@@ -1216,7 +1269,13 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
     }
 
     const unitPrice = payable.price;
-    const total = orderTotal(unitPrice, quantity);
+    const feeSettings = await getFeeSettings();
+    const breakdown = orderBreakdown({
+      unitPrice,
+      quantity,
+      feePerTicket: serviceFeePerTicket(payable.event, feeSettings, { guest: true })
+    });
+    const total = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
     const ticketLabel = `${quantity} ticket${quantity > 1 ? 's' : ''}`;
 
     let checkoutId = null;
@@ -1237,7 +1296,8 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
         pricing: { amount: total.toFixed(2), currency: 'NGN' },
         customer: { email: guest.email, name: guest.name },
         success_url: `${frontendBase()}/events.html?payment=success&guest=1&event_id=${encodeURIComponent(event_id)}`,
-        cancel_url: `${frontendBase()}/events.html?payment=cancelled`
+        cancel_url: `${frontendBase()}/events.html?payment=cancelled`,
+        ...(feeSettings.customer_bears_gateway_fee ? { customer_bears_fee: true } : {})
       };
 
       let gwRes = null;
@@ -1279,6 +1339,8 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
         guest_phone: guest.phone,
         event_id: payable.event.id,
         amount: total,
+        subtotal_amount: breakdown.subtotal_amount,
+        service_fee: breakdown.service_fee,
         ticket_quantity: quantity,
         payment_type: 'event_registration',
         transaction_id: String(checkoutId),
@@ -1300,8 +1362,8 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
       checkout_id: String(checkoutId),
       payment_id: intent.id,
       quantity,
-      unit_price: unitPrice,
-      total_amount: total,
+      ...breakdown,
+      gateway_fee_added_at_checkout: !!feeSettings.customer_bears_gateway_fee,
       ...(isSimulation ? { is_simulation: true } : {})
     }, 'Guest checkout created');
   } catch (error) {
@@ -1361,7 +1423,10 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
       ticket_number: ticketNumber,
       ticket_quantity: quantity,
       total_amount: Number(settled.amount),
-      unit_price: Math.round((Number(settled.amount) / quantity) * 100) / 100,
+      subtotal_amount: Number(settled.subtotal_amount ?? settled.amount),
+      service_fee: Number(settled.service_fee || 0),
+      gateway_fee: settled.gateway_fee != null ? Number(settled.gateway_fee) : null,
+      unit_price: money(Number(settled.subtotal_amount ?? settled.amount) / quantity),
       payment: {
         id: settled.id,
         transaction_id: settled.transaction_id,
@@ -1375,6 +1440,156 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
   } catch (error) {
     console.error('Guest verify error:', error);
     return errorResponse(res, 'Could not confirm payment. Please try again.', 500);
+  }
+});
+
+// ============================================
+// TICKET FEE SETTINGS
+// ============================================
+// Public: what buyers will pay on top of the ticket price, so the events page
+// can show the full breakdown BEFORE checkout.
+router.get('/fees', async (req, res) => {
+  try {
+    const s = await getFeeSettings();
+    return successResponse(res, {
+      member_service_fee: s.member_service_fee,
+      guest_service_fee: s.guest_service_fee,
+      gateway_fee_added_at_checkout: s.customer_bears_gateway_fee
+    }, 'Ticket fees');
+  } catch (error) {
+    console.error('Fee settings read error:', error);
+    return errorResponse(res, 'Could not load ticket fees', 500);
+  }
+});
+
+// Admin: read the full settings.
+router.get('/fee-settings', authenticate, requireAdmin, async (req, res) => {
+  try {
+    return successResponse(res, await getFeeSettings({ fresh: true }), 'Fee settings');
+  } catch (error) {
+    return errorResponse(res, 'Could not load fee settings', 500);
+  }
+});
+
+// Super admin only: change them (audited).
+router.put('/fee-settings', authenticate, requireSuperAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const updates = {};
+    for (const key of ['member_service_fee', 'guest_service_fee']) {
+      if (body[key] === undefined) continue;
+      const n = Number(body[key]);
+      if (!Number.isFinite(n) || n < 0 || n > 100000) {
+        return errorResponse(res, `${key.replace(/_/g, ' ')} must be between ₦0 and ₦100,000 per ticket.`, 400);
+      }
+      updates[key] = money(n);
+    }
+    if (body.customer_bears_gateway_fee !== undefined) {
+      updates.customer_bears_gateway_fee = body.customer_bears_gateway_fee === true || body.customer_bears_gateway_fee === 'true';
+    }
+    if (!Object.keys(updates).length) return errorResponse(res, 'Nothing to update.', 400);
+
+    const before = await getFeeSettings({ fresh: true });
+    const { data, error } = await supabase
+      .from('fee_settings')
+      .upsert([{ id: 1, ...updates, updated_at: new Date().toISOString(), updated_by: req.userId }], { onConflict: 'id' })
+      .select()
+      .single();
+    if (error) throw error;
+    invalidateFeeSettings();
+
+    await auditLog({
+      action: 'fee_settings_updated',
+      userId: req.userId,
+      userEmail: req.user?.email,
+      details: {
+        target: 'Ticket fee settings',
+        outcome: 'success',
+        actor_type: 'admin',
+        before: {
+          member_service_fee: before.member_service_fee,
+          guest_service_fee: before.guest_service_fee,
+          customer_bears_gateway_fee: before.customer_bears_gateway_fee
+        },
+        after: updates
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    return successResponse(res, await getFeeSettings({ fresh: true }), 'Fee settings updated');
+  } catch (error) {
+    console.error('Fee settings update error:', error);
+    return errorResponse(res, 'Could not update fee settings', 500);
+  }
+});
+
+// ============================================
+// REVENUE REPORT (Admin)
+// ============================================
+// Confirmed ticket orders split into: tickets (NACOS), service fees, and the
+// Bachs processing fee buyers paid on top. Grouped by event and by month.
+router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const PAGE = 1000;
+    const rows = [];
+    for (let from = 0; from < 50000; from += PAGE) {
+      let q = supabase
+        .from('payments')
+        .select('id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email')
+        .eq('status', 'verified')
+        .eq('payment_type', 'event_registration');
+      if (start_date) q = q.gte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(start_date) ? `${start_date}T00:00:00.000Z` : start_date);
+      if (end_date) q = q.lte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(end_date) ? `${end_date}T23:59:59.999Z` : end_date);
+      const { data, error } = await q.order('verified_at', { ascending: false }).range(from, from + PAGE - 1);
+      if (error) throw error;
+      rows.push(...(data || []));
+      if (!data || data.length < PAGE) break;
+    }
+
+    const eventIds = [...new Set(rows.map(r => r.event_id).filter(Boolean))];
+    const titles = {};
+    if (eventIds.length) {
+      const { data: evs } = await supabase.from('events').select('id, title, date').in('id', eventIds);
+      (evs || []).forEach(e => { titles[e.id] = { title: e.title, date: e.date }; });
+    }
+
+    const blank = () => ({ orders: 0, tickets: 0, ticket_revenue: 0, service_fees: 0, gateway_fees: 0, collected: 0, guest_orders: 0 });
+    const add = (bucket, r) => {
+      const subtotal = money(r.subtotal_amount ?? r.amount);
+      const fee = money(r.service_fee || 0);
+      bucket.orders += 1;
+      bucket.tickets += quantityOf(r);
+      bucket.ticket_revenue = money(bucket.ticket_revenue + subtotal);
+      bucket.service_fees = money(bucket.service_fees + fee);
+      bucket.gateway_fees = money(bucket.gateway_fees + money(r.gateway_fee || 0));
+      bucket.collected = money(bucket.collected + money(r.amount));
+      if (!r.user_id && r.guest_email) bucket.guest_orders += 1;
+    };
+
+    const totals = blank();
+    const byEvent = {};
+    const byMonth = {};
+    for (const r of rows) {
+      add(totals, r);
+      const ek = r.event_id || 'none';
+      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: titles[r.event_id]?.title || 'Unknown event', date: titles[r.event_id]?.date || null, ...blank() };
+      add(byEvent[ek], r);
+      const mk = String(r.verified_at || r.submitted_at || '').slice(0, 7) || 'unknown';
+      byMonth[mk] = byMonth[mk] || { month: mk, ...blank() };
+      add(byMonth[mk], r);
+    }
+
+    return successResponse(res, {
+      totals,
+      by_event: Object.values(byEvent).sort((a, b) => b.collected - a.collected),
+      by_month: Object.values(byMonth).sort((a, b) => (a.month < b.month ? 1 : -1)),
+      gateway_fee_note: 'Bachs fees are shown when Bachs reports them on the payment. With "buyer pays processing fee" on, they were paid by buyers on top of the amounts above.'
+    }, 'Revenue report');
+  } catch (error) {
+    console.error('Revenue report error:', error);
+    return errorResponse(res, 'Could not build the revenue report', 500);
   }
 });
 
@@ -1470,7 +1685,10 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       'Payment Type',
       'Tickets',
       'Unit Price (NGN)',
+      'Tickets Subtotal (NGN)',
+      'Service Fee (NGN)',
       'Amount (NGN)',
+      'Bachs Fee (NGN)',
       'Status',
       'Gateway',
       'Ticket Number',
@@ -1491,7 +1709,9 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       const purpose = eventInfo?.title || p.description || (p.payment_type === 'event_registration' ? 'Event Registration' : 'Payment');
       const amount = Number(p.amount) || 0;
       const tickets = p.payment_type === 'event_registration' ? quantityOf(p) : '';
-      const unitPrice = tickets ? Math.round((amount / tickets) * 100) / 100 : '';
+      const subtotal = money(p.subtotal_amount ?? amount);
+      const serviceFee = money(p.service_fee || 0);
+      const unitPrice = tickets ? money(subtotal / tickets) : '';
       const gateway = p.gateway || (p.transaction_id?.startsWith('bach_') ? 'Bachs' : 'Paystack');
       const dateSubmitted = p.submitted_at || p.created_at ? new Date(p.submitted_at || p.created_at).toISOString() : '';
       const verifiedAt = p.verified_at ? new Date(p.verified_at).toISOString() : '';
@@ -1507,7 +1727,10 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
         escapeCsv(p.payment_type || 'event_registration'),
         escapeCsv(tickets),
         escapeCsv(unitPrice),
+        escapeCsv(subtotal),
+        escapeCsv(serviceFee),
         escapeCsv(amount),
+        escapeCsv(p.gateway_fee != null ? money(p.gateway_fee) : ''),
         escapeCsv(p.status || 'verified'),
         escapeCsv(gateway),
         escapeCsv(p.ticket_number || (p.event_id && p.status === 'verified' ? ticketNumberFor(p.event_id, p.id) : '')),
@@ -1869,7 +2092,8 @@ router.post('/webhook', async (req, res) => {
           amountNaira: parseFloat(rawAmt),
           currency: bData.pricing?.currency || bData.currency || 'NGN',
           customerEmail: bData.customer?.email || event.customer?.email || bData.metadata?.email,
-          source: chargeId ? `Bachs webhook (gateway ref ${chargeId})` : 'Bachs webhook'
+          source: chargeId ? `Bachs webhook (gateway ref ${chargeId})` : 'Bachs webhook',
+          gatewayFee: gatewayFeeOf(bData)
         });
         console.log('[Bachs Webhook] Settled', ref, JSON.stringify(result));
       }
@@ -1939,7 +2163,7 @@ router.post('/webhook', async (req, res) => {
  * fallback. Underpaid payments are recorded as `pending` for admin review and
  * no ticket is issued.
  */
-async function settleWebhookPayment({ reference, amountNaira, currency, customerEmail, hintedEventId = null, hintedUserId = null, source }) {
+async function settleWebhookPayment({ reference, amountNaira, currency, customerEmail, hintedEventId = null, hintedUserId = null, source, gatewayFee = null }) {
   if (!reference || reference === 'undefined') throw new Error('Webhook payload has no reference');
 
   const { data: existing, error: existingErr } = await supabase
@@ -1970,19 +2194,32 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
   let targetEvent = null;
   let expected = null;
   let quantity = 1;
+  let priced = null; // { total_amount, subtotal_amount, service_fee }
   const eventId = existing?.event_id || hintedEventId || null;
   if (eventId) {
     const payable = await loadPayableEvent(eventId, { guest: isGuestOrder });
     if (!payable.error) {
       targetEvent = payable.event;
-      // Quantity comes from the server-recorded checkout. Without one, infer it
-      // from how many full tickets the confirmed amount covers.
-      if (existing && existing.event_id) {
+      if (existing && existing.event_id && money(existing.amount) > 0) {
+        // The server-recorded checkout is authoritative (quantity, tickets + service fee).
         quantity = quantityOf(existing);
-      } else if (Number.isFinite(amountNaira)) {
-        quantity = Math.min(MAX_TICKETS_PER_ORDER, Math.max(1, Math.floor((amountNaira + 0.01) / payable.price)));
+        priced = {
+          total_amount: money(existing.amount),
+          subtotal_amount: money(existing.subtotal_amount ?? existing.amount),
+          service_fee: money(existing.service_fee || 0)
+        };
+      } else {
+        // No recorded checkout: infer how many full tickets (price + service
+        // fee each) the confirmed amount covers, priced with current settings.
+        const feeSettings = await getFeeSettings();
+        const feePerTicket = serviceFeePerTicket(payable.event, feeSettings, { guest: isGuestOrder });
+        if (existing && existing.event_id) quantity = quantityOf(existing);
+        else if (Number.isFinite(amountNaira)) {
+          quantity = Math.min(MAX_TICKETS_PER_ORDER, Math.max(1, Math.floor((amountNaira + 0.01) / (payable.price + feePerTicket))));
+        }
+        priced = orderBreakdown({ unitPrice: payable.price, quantity, feePerTicket });
       }
-      expected = orderTotal(payable.price, quantity);
+      expected = priced.total_amount;
     }
   }
 
@@ -1993,6 +2230,14 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
     ? `${source}: UNDERPAID or unreadable amount (paid ${amountNaira} ${currency}, expected ${expected} NGN). Needs admin review; no ticket issued.`
     : `Verified via ${source}`;
 
+  // Store our breakdown (tickets + service fee) for paid-in-full event orders;
+  // the Bachs fee the buyer paid on top is recorded separately.
+  const recordedAmount = (priced && !underpaid) ? priced.total_amount : (Number.isFinite(amountNaira) ? amountNaira : 0);
+  const feeColumns = {
+    ...(priced ? { subtotal_amount: priced.subtotal_amount, service_fee: priced.service_fee } : {}),
+    ...(gatewayFee != null ? { gateway_fee: gatewayFee } : {})
+  };
+
   let payment = existing;
   if (!existing) {
     const { data: inserted, error: insErr } = await supabase
@@ -2000,7 +2245,8 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
       .insert([{
         user_id: userId,
         event_id: targetEvent ? targetEvent.id : null,
-        amount: Number.isFinite(amountNaira) ? amountNaira : 0,
+        amount: recordedAmount,
+        ...feeColumns,
         ticket_quantity: quantity,
         payment_type: targetEvent ? 'event_registration' : 'other',
         transaction_id: reference,
@@ -2022,7 +2268,8 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
       .from('payments')
       .update({
         user_id: existing.user_id || userId,
-        amount: Number.isFinite(amountNaira) ? amountNaira : existing.amount,
+        amount: (priced && !underpaid) ? priced.total_amount : (Number.isFinite(amountNaira) ? amountNaira : existing.amount),
+        ...feeColumns,
         status: underpaid ? 'pending' : 'verified',
         verified_at: underpaid ? null : now,
         notes
