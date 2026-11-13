@@ -211,29 +211,12 @@ try {
   // If not installed yet, we'll fall back to memory
 }
 
-const createRedisStore = (prefix) => {
-  if (redisClient && RedisStore) {
-    try {
-      return new RedisStore({
-        sendCommand: async (...args) => {
-          if (!redisClient || (redisClient.status !== 'ready' && redisClient.status !== 'connecting')) {
-            return 0;
-          }
-          try {
-            return await redisClient.call(...args);
-          } catch (err) {
-            console.warn(`⚠️ RateLimit Redis fallback for ${prefix}:`, err.message);
-            return 0;
-          }
-        },
-        prefix: `rl:${prefix}:`
-      });
-    } catch (err) {
-      console.warn('⚠️ Could not initialize RedisStore for', prefix, err.message);
-    }
-  }
-  return undefined;
-};
+// Redis-backed when Redis is ready, in-memory otherwise. Never fails a
+// request because Redis is cold or slow (the old wrapper answered with a fake
+// `0`, which made rate-limit-redis throw and the first requests after a cold
+// start return 500). See middleware/resilientRateLimitStore.js.
+const { createResilientStore } = require('./middleware/resilientRateLimitStore');
+const createRedisStore = (prefix) => createResilientStore({ redisClient, RedisStore, prefix, logger: console });
 
 // Upgrade ALL route-level limiters with dedicated Redis store instances
 initRateLimiters(redisClient ? createRedisStore : undefined);
@@ -431,6 +414,17 @@ app.use((err, req, res, next) => {
 // ============================================
 // START SERVER (Standalone only — skipped in Vercel Serverless)
 // ============================================
+
+// On Vercel the standalone handlers below are skipped. Without a handler,
+// Node treats an unhandled promise rejection as fatal and kills the function
+// instance mid-request; log it instead (and report it) so one stray rejection
+// can't take requests down with it.
+if (process.env.VERCEL && !process.listenerCount('unhandledRejection')) {
+  process.on('unhandledRejection', (reason) => {
+    logger.error('Unhandled promise rejection', { reason: reason && reason.stack ? reason.stack : String(reason) });
+    if (sentry.isEnabled) sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+  });
+}
 
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 5000;
