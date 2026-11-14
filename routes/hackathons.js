@@ -7,6 +7,7 @@ const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, slugify } = require('../utils/helpers');
 const { triggerAutoContentBroadcast, sendHackathonTeamAdminNotificationEmail } = require('../services/email');
 const rateLimit = require('express-rate-limit');
+const { registerLimiter } = require('../middleware/rateLimitInstances');
 
 // ============================================
 // 1. PUBLIC: GET ALL ACTIVE / UPCOMING HACKATHONS
@@ -287,15 +288,16 @@ async function loadTakenRoster(hackathonId, skipLeaderId) {
 
 // Search as you type: one search per keystroke pause, so allow a brisk pace
 // per student while stopping scraping of the student list.
-const teammateSearchLimiter = rateLimit({
+const teammateSearchLimiter = registerLimiter('tmsearch', (store) => rateLimit({
     windowMs: 60 * 1000,
     max: 40,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => req.userId || req.ip,
     message: { success: false, error: 'Too many searches. Please slow down.' },
-    validate: { trustProxy: false }
-});
+    validate: { trustProxy: false },
+    store
+}));
 
 // ============================================
 // STUDENT: FIND TEAMMATES (search as you type)
@@ -310,22 +312,31 @@ router.get('/:id/teammate-search', authenticate, teammateSearchLimiter, async (r
         const q = String(req.query.q || '').replace(/[,()*%\\":.]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 50);
         if (q.length < 3) return successResponse(res, { results: [] }, 'Type at least 3 letters');
 
-        const taken = await loadTakenRoster(id, req.userId);
-
-        const { data, error } = await supabase
-            .from('students_with_current_level')
-            .select('user_id, name, first_name, last_name, email, department, current_level, profile_picture_url')
-            .eq('status', 'active')
-            .in('visibility', ['students-only', 'public'])
-            .neq('user_id', req.userId)
-            .or(`name.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
-            .order('name', { ascending: true })
-            .limit(25);
+        // Both lookups at once (they don't depend on each other).
+        const FETCH = 60;
+        const [taken, studentsRes] = await Promise.all([
+            loadTakenRoster(id, req.userId),
+            supabase
+                .from('students_with_current_level')
+                .select('user_id, name, first_name, last_name, email, department, current_level, profile_picture_url')
+                .eq('status', 'active')
+                .in('visibility', ['students-only', 'public'])
+                .neq('user_id', req.userId)
+                .or(`name.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
+                .order('name', { ascending: true })
+                .limit(FETCH)
+        ]);
+        const { data, error } = studentsRes;
         if (error) throw error;
 
-        const results = (data || [])
-            .filter(s => s.user_id && !taken.byUser.has(s.user_id) && !taken.byEmail.has(normEmail(s.email)))
-            .slice(0, 8)
+        // Up to 30 so the browser can keep narrowing the list as more letters
+        // are typed without asking again. `complete` = every match is included.
+        const MAX = 30;
+        const available = (data || [])
+            .filter(s => s.user_id && !taken.byUser.has(s.user_id) && !taken.byEmail.has(normEmail(s.email)));
+        const complete = (data || []).length < FETCH && available.length <= MAX;
+        const results = available
+            .slice(0, MAX)
             .map(s => ({
                 user_id: s.user_id,
                 name: s.name || `${s.first_name || ''} ${s.last_name || ''}`.trim(),
@@ -334,7 +345,7 @@ router.get('/:id/teammate-search', authenticate, teammateSearchLimiter, async (r
                 avatar: s.profile_picture_url || null
             }));
 
-        return successResponse(res, { results }, 'Matching students');
+        return successResponse(res, { results, complete }, 'Matching students');
     } catch (error) {
         console.error('Teammate search error:', error);
         return errorResponse(res, 'Could not search students right now', 500);

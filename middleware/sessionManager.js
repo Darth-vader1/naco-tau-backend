@@ -4,6 +4,7 @@
 const { supabase } = require('../config/supabase');
 const { logger } = require('../config/logger');
 const { redisClient } = require('../config/redis');
+const { getAuthContext } = require('./auth');
 
 /**
  * Session configuration
@@ -23,6 +24,10 @@ const SESSION_CONFIG = {
  * Session metadata store (in-memory fallback when Redis is unavailable)
  */
 const sessionStore = new Map();
+
+/** When this instance last wrote each user's session to Redis. */
+const recentSaves = new Map();
+const SAVE_INTERVAL_MS = 60 * 1000;
 
 /**
  * Session metadata structure
@@ -105,6 +110,7 @@ async function getStoredSession(userId) {
  */
 async function saveStoredSession(session) {
   sessionStore.set(session.userId, session);
+  recentSaves.set(session.userId, Date.now());
   if (redisClient) {
     try {
       const ttlSec = Math.max(1, Math.floor(SESSION_CONFIG.SESSION_TIMEOUT / 1000));
@@ -120,6 +126,7 @@ async function saveStoredSession(session) {
  */
 async function removeStoredSession(userId) {
   sessionStore.delete(userId);
+  recentSaves.delete(userId);
   if (redisClient) {
     try {
       await redisClient.del(`session:${userId}`);
@@ -151,15 +158,24 @@ const trackSession = async (req, res, next) => {
       return next(); // No token, continue (will be handled by authenticate middleware)
     }
 
-    // Verify token with Supabase
-    const { data: { user }, error } = await supabase.auth.getUser(accessToken);
-    
-    if (error || !user) {
+    // Verify token, reusing the login check that `authenticate` caches
+    // (saves a Supabase Auth round trip on every signed-in request).
+    let user = null;
+    try {
+      const ctx = await getAuthContext(accessToken);
+      user = ctx && !ctx.invalid ? ctx.user : null;
+    } catch (e) {
+      user = null;
+    }
+    if (!user) {
       return next(); // Invalid token, continue
     }
 
-    // Get or create session metadata
-    let session = await getStoredSession(user.id);
+    // Get or create session metadata. A copy this instance wrote in the
+    // last minute is used as-is, skipping the Redis read.
+    const savedAt = recentSaves.get(user.id) || 0;
+    let session = (Date.now() - savedAt < SAVE_INTERVAL_MS && sessionStore.get(user.id))
+      || await getStoredSession(user.id);
     if (!session) {
       session = new SessionMetadata(user.id, user.email);
       await saveStoredSession(session);
@@ -181,8 +197,13 @@ const trackSession = async (req, res, next) => {
       });
     }
 
-    // Save updated activity back to Redis/Memory
-    await saveStoredSession(session);
+    // Save updated activity back to Redis/Memory, at most once a minute
+    // per user (no need to write on every keystroke-driven request).
+    if (Date.now() - (recentSaves.get(user.id) || 0) >= SAVE_INTERVAL_MS) {
+      await saveStoredSession(session);
+    } else {
+      sessionStore.set(user.id, session);
+    }
 
     // Attach session info to request
     req.sessionMetadata = session;

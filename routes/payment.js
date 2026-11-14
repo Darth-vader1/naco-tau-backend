@@ -8,6 +8,7 @@ const { successResponse, errorResponse, generateTransactionId } = require('../ut
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
+const { registerLimiter } = require('../middleware/rateLimitInstances');
 const {
   MAX_TICKETS_PER_ORDER,
   parseTicketQuantity,
@@ -1080,14 +1081,15 @@ router.post('/:id/recheck', authenticate, async (req, res) => {
 // only for events the admin has opened to the public. The ticket is emailed
 // to the address they give; they recover it with reference + email.
 
-const guestLimiter = rateLimit({
+const guestLimiter = registerLimiter('guest', (store) => rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Math.max(1, parseInt(process.env.GUEST_CHECKOUT_RATE_LIMIT || '20', 10)),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many guest checkout attempts. Please try again in a few minutes.' },
-  validate: { trustProxy: false }
-});
+  validate: { trustProxy: false },
+  store
+}));
 
 const GUEST_EMAIL_RE = /^[^\s@<>"']+@[^\s@<>"']+\.[A-Za-z]{2,}$/;
 const MEMBER_EMAIL_RE = /@(st\.)?tau\.edu\.ng$/i;
