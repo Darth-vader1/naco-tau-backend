@@ -5,7 +5,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin, optionalAuth } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, slugify } = require('../utils/helpers');
-const { triggerAutoContentBroadcast } = require('../services/email');
+const { triggerAutoContentBroadcast, sendHackathonTeamAdminNotificationEmail } = require('../services/email');
 
 // ============================================
 // 1. PUBLIC: GET ALL ACTIVE / UPCOMING HACKATHONS
@@ -286,10 +286,21 @@ router.post('/:id/register', authenticate, async (req, res) => {
             return errorResponse(res, 'Registration deadline for this event has passed', 400);
         }
 
-        // Validate team member array bounds
-        const members = Array.isArray(teamMembers) ? teamMembers : [];
-        if (members.length + 1 > (hackathon.max_team_size || 4)) {
-            return errorResponse(res, `Team size cannot exceed ${hackathon.max_team_size} members`, 400);
+        // Validate team size. team_members can also carry internal rows
+        // ([ROLE_REQ], [LEADER_META]); the leader is counted once, never again
+        // as a teammate even if they listed themselves.
+        const leaderEmail = String(req.user?.email || '').trim().toLowerCase();
+        const META_ROWS = ['[ROLE_REQ]', '[LEADER_META]'];
+        const members = (Array.isArray(teamMembers) ? teamMembers : []).filter(m => {
+            if (!m || typeof m !== 'object') return false;
+            if (META_ROWS.includes(m.name)) return true; // keep internal rows as stored
+            const email = String(m.email || '').trim().toLowerCase();
+            return !(leaderEmail && email && email === leaderEmail); // drop the leader listed as a teammate
+        });
+        const teammateCount = members.filter(m => !META_ROWS.includes(m.name)).length;
+        const maxSize = hackathon.max_team_size || 4;
+        if (teammateCount + 1 > maxSize) {
+            return errorResponse(res, `Team size cannot exceed ${maxSize} members (you plus ${maxSize - 1} teammates).`, 400);
         }
 
         const trimmedName = teamName.trim();
@@ -368,6 +379,29 @@ router.post('/:id/register', authenticate, async (req, res) => {
             details: { hackathon_id: id, team_name: trimmedName },
             ip: req.ip
         });
+
+        // Tell the admins about the new team. Awaited (bounded) so a serverless
+        // platform can't freeze the function before it is sent; never blocks or
+        // fails the registration itself.
+        try {
+            const { data: leaderProfile } = await supabase
+                .from('students')
+                .select('name, first_name, last_name, email, matric_no, phone, department, current_level')
+                .eq('user_id', req.userId)
+                .maybeSingle();
+            const teammates = members.filter(m => !META_ROWS.includes(m.name));
+            await Promise.race([
+                sendHackathonTeamAdminNotificationEmail({
+                    hackathon,
+                    registration: reg,
+                    leader: leaderProfile || { email: req.user?.email },
+                    teammates
+                }),
+                new Promise(resolve => setTimeout(resolve, 8000))
+            ]);
+        } catch (notifyErr) {
+            console.warn('[hackathons] new-team admin email failed (non-fatal):', notifyErr?.message || notifyErr);
+        }
 
         return successResponse(res, { registration: reg }, 'Successfully registered for hackathon!', 201);
     } catch (error) {

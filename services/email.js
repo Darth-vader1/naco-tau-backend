@@ -1042,6 +1042,72 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
 }
 
 // ============================================
+// SEND NEW HACKATHON TEAM ALERT TO ADMINS
+// ============================================
+// Recipients: HACKATHON_ALERT_EMAILS (comma-separated) if set, otherwise the
+// same people who get payment alerts.
+async function sendHackathonTeamAdminNotificationEmail({ hackathon, registration, leader, teammates = [] }) {
+    try {
+        const configured = String(process.env.HACKATHON_ALERT_EMAILS || '')
+            .split(',').map(e => e.trim()).filter(Boolean);
+        const adminEmail = process.env.ADMIN_EMAIL;
+        const recipients = configured.length
+            ? configured
+            : ['nacos@tau.edu.ng', 'olufemi-abiodun.gbolahan@st.tau.edu.ng'];
+        if (!configured.length && adminEmail && !recipients.includes(adminEmail)) recipients.push(adminEmail);
+
+        const hackTitle = hackathon?.title || 'Hackathon';
+        const teamName = registration?.team_name || 'New team';
+        const leaderName = leader?.name || `${leader?.first_name || ''} ${leader?.last_name || ''}`.trim() || 'Team leader';
+        const teamSize = teammates.length + 1;
+        const maxSize = hackathon?.max_team_size || null;
+        const dateStr = new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
+        const adminUrl = `${FRONTEND_URL}/admin-dashboard.html`;
+
+        const teammatesHtml = teammates.length
+            ? teammates.map(m => `${m.name || 'Member'}${m.role ? ` <span style="color:#64748b;">(${m.role})</span>` : ''}${m.email ? `<br><span style="color:#64748b; font-size:12px;">${m.email}</span>` : ''}`).join('<br>')
+            : '<span style="color:#64748b;">No teammates listed yet (solo or still recruiting)</span>';
+
+        const metaRows = [
+            { label: 'Competition', value: `<strong>${hackTitle}</strong>` },
+            { label: 'Team Name', value: `<strong style="font-size: 16px; color: #157a09;">${teamName}</strong>` },
+            { label: 'Team Size', value: `${teamSize} ${teamSize === 1 ? 'person' : 'people'}${maxSize ? ` (max ${maxSize})` : ''}` },
+            { label: 'Track', value: registration?.track_selected || 'General' },
+            { label: 'Team Leader', value: leaderName },
+            ...(leader?.email ? [{ label: 'Leader Email', value: leader.email }] : []),
+            ...(leader?.matric_no ? [{ label: 'Matric No', value: leader.matric_no }] : []),
+            ...(leader?.phone ? [{ label: 'Leader Phone', value: leader.phone }] : []),
+            ...(leader?.department ? [{ label: 'Department', value: `${leader.department}${leader.current_level ? ` (${leader.current_level} Level)` : ''}` }] : []),
+            { label: 'Teammates', value: teammatesHtml },
+            ...(registration?.is_looking_for_members ? [{ label: 'Recruiting', value: 'Yes, looking for more members' }] : []),
+            { label: 'Registered', value: dateStr }
+        ];
+
+        const html = renderBaseLayout({
+            headerBadge: 'Hackathon Registration',
+            headerTitle: '🧑‍💻 New Team Registered',
+            headerSubtitle: `${teamName} just signed up for ${hackTitle}`,
+            contentTitle: `${teamName} (${teamSize} ${teamSize === 1 ? 'person' : 'people'})`,
+            metaRows,
+            buttonText: 'View Teams in Admin Dashboard',
+            buttonUrl: adminUrl,
+            noticeText: 'NACOS TAU Hackathon Notification'
+        });
+
+        const text = `New team registered for ${hackTitle}\nTeam: ${teamName}\nTeam size: ${teamSize}${maxSize ? ` (max ${maxSize})` : ''}\nTrack: ${registration?.track_selected || 'General'}\nLeader: ${leaderName}${leader?.email ? ` <${leader.email}>` : ''}\nTeammates: ${teammates.map(m => m.name).join(', ') || 'none yet'}\nTime: ${dateStr}\n\nNACOS TAU Portal`;
+
+        return await sendEmail({
+            to: recipients,
+            subject: `🧑‍💻 New Team: ${teamName} registered for ${hackTitle}`,
+            html,
+            text
+        });
+    } catch (err) {
+        console.error('Failed to send hackathon team admin notification:', err);
+    }
+}
+
+// ============================================
 // SEND PAYMENT ALERT TO ADMIN (nacos@tau.edu.ng)
 // ============================================
 async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber }) {
@@ -1340,6 +1406,7 @@ module.exports = {
     sendNewStudentAdminNotification,
     sendEventTicketEmail,
     sendPaymentAdminNotificationEmail,
+    sendHackathonTeamAdminNotificationEmail,
     getActiveStudents,
     getEmailTemplate,
     logNotification,
