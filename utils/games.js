@@ -50,16 +50,158 @@ async function loadEventItem(itemId) {
 async function playsRemainingForItem(item) {
   const cap = Number(item?.max_plays);
   if (!Number.isFinite(cap) || cap <= 0) return Infinity;
-  const { data, error } = await supabase
+  // Plays come from single-game orders (event_item_id) and multi-game
+  // orders (order_items lines), so read the event's game orders and count.
+  let res = await supabase
     .from('event_registrations')
-    .select('ticket_quantity, status')
-    .eq('event_item_id', item.id);
-  if (error) throw error;
-  const used = (data || [])
+    .select('ticket_quantity, status, event_item_id, order_items')
+    .eq('event_id', item.event_id);
+  if (res.error && isMissingColumn(res.error, 'order_items')) {
+    res = await supabase
+      .from('event_registrations')
+      .select('ticket_quantity, status, event_item_id')
+      .eq('event_item_id', item.id);
+  }
+  if (res.error) throw res.error;
+  const used = (res.data || [])
     .filter(r => (r.status || 'registered') !== 'cancelled')
-    .reduce((sum, r) => sum + quantityOf(r), 0);
+    .reduce((sum, r) => sum + playsOfItemIn(r, item.id), 0);
   return Math.max(0, cap - used);
 }
+
+const isMissingColumn = (error, col) => !!error && (
+  error.code === '42703' || error.code === 'PGRST204' ||
+  new RegExp(col).test(error.message || '') && /does not exist|could not find/i.test(error.message || '')
+);
+
+/** How many plays of one game a registration or payment row holds. */
+function playsOfItemIn(row, itemId) {
+  if (Array.isArray(row?.order_items) && row.order_items.length) {
+    return row.order_items.filter(l => l && l.item_id === itemId).reduce((s, l) => s + (parseInt(l.plays, 10) || 0), 0);
+  }
+  return row?.event_item_id === itemId ? quantityOf(row) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Orders with several games: lines = [{ item_id, plays }]
+// ---------------------------------------------------------------------------
+const MAX_PLAYS_PER_GAME = Math.max(1, parseInt(process.env.MAX_TICKETS_PER_ORDER || '10', 10) || 10);
+const MAX_PLAYS_PER_ORDER = Math.max(MAX_PLAYS_PER_GAME, parseInt(process.env.MAX_PLAYS_PER_ORDER || '50', 10) || 50);
+
+/**
+ * Game lines the buyer asked for. Accepts `items: [{ item_id, plays }]`, or
+ * the older single-game `item_id` + quantity. Returns { lines } (null when
+ * no game was picked) or { error }.
+ */
+function parseGameLines(body = {}, quantity = null) {
+  if (Array.isArray(body.items) && body.items.length) {
+    if (body.items.length > MAX_GAMES_PER_EVENT) return { error: `You can pick at most ${MAX_GAMES_PER_EVENT} games per order.` };
+    const merged = new Map();
+    for (const raw of body.items) {
+      const id = raw && raw.item_id;
+      const plays = Number(raw && raw.plays);
+      if (!isUuid(id)) return { error: 'One of the games picked is not valid.' };
+      if (!Number.isInteger(plays) || plays < 1) return { error: 'Each game needs at least 1 play.' };
+      merged.set(id, (merged.get(id) || 0) + plays);
+    }
+    const lines = [...merged].map(([item_id, plays]) => ({ item_id, plays }));
+    if (lines.some(l => l.plays > MAX_PLAYS_PER_GAME)) return { error: `You can buy up to ${MAX_PLAYS_PER_GAME} plays of each game per order.` };
+    const total = lines.reduce((s, l) => s + l.plays, 0);
+    if (total > MAX_PLAYS_PER_ORDER) return { error: `You can buy up to ${MAX_PLAYS_PER_ORDER} plays per order.` };
+    return { lines };
+  }
+  if (body.item_id) {
+    if (!isUuid(body.item_id)) return { error: 'That game is not part of this event.' };
+    const plays = Number(quantity);
+    if (!Number.isInteger(plays) || plays < 1 || plays > MAX_PLAYS_PER_GAME) return { error: `You can buy between 1 and ${MAX_PLAYS_PER_GAME} plays per game.` };
+    return { lines: [{ item_id: body.item_id, plays }] };
+  }
+  return { lines: null };
+}
+
+/** Game lines recorded on a payment (or registration) row, or null. */
+function linesFromRow(row) {
+  if (!row) return null;
+  if (Array.isArray(row.order_items) && row.order_items.length) {
+    return row.order_items.map(l => ({ item_id: l.item_id, plays: parseInt(l.plays, 10) || 0, name: l.name, unit_price: l.unit_price }));
+  }
+  if (row.event_item_id) return [{ item_id: row.event_item_id, plays: quantityOf(row) }];
+  return null;
+}
+
+/**
+ * Price game lines against the event's games. When settling a paid order a
+ * game hidden since checkout still counts. Returns
+ * { lines: [{ item_id, name, plays, unit_price }], quantity, subtotal } or { error, status }.
+ */
+async function priceGameLines(event, lines, { guest = false, settling = false, activeItems = null } = {}) {
+  const items = activeItems || await loadEventItems(event.id);
+  const priced = [];
+  for (const line of lines) {
+    const item = items.find(i => i.id === line.item_id) || (settling ? await loadEventItem(line.item_id) : null);
+    if (!item || item.event_id !== event.id) return { error: 'That game is not part of this event.', status: 400 };
+    let price;
+    if (guest) {
+      price = Number(item.public_price);
+      if (!event.open_to_public || !Number.isFinite(price) || price <= 0) {
+        return { error: `${item.name} is for NACOS members only. Please sign in to play.`, status: 403 };
+      }
+    } else {
+      price = Number(item.price);
+      if (!Number.isFinite(price) || price <= 0) return { error: `${item.name} has no price set.`, status: 400 };
+    }
+    priced.push({ item_id: item.id, name: item.name, plays: line.plays, unit_price: Math.round(price * 100) / 100, _item: item });
+  }
+  const quantity = priced.reduce((s, l) => s + l.plays, 0);
+  const subtotal = Math.round(priced.reduce((s, l) => s + l.unit_price * l.plays, 0) * 100) / 100;
+  return { lines: priced, quantity, subtotal };
+}
+
+/** Same shape as fees.orderBreakdown, for a game order. */
+function gameBreakdown(priced, feePerPlay) {
+  const fee = Math.round(Number(feePerPlay || 0) * 100) / 100;
+  const service = Math.round(fee * priced.quantity * 100) / 100;
+  return {
+    unit_price: priced.quantity ? Math.round((priced.subtotal / priced.quantity) * 100) / 100 : 0,
+    quantity: priced.quantity,
+    service_fee_per_ticket: fee,
+    subtotal_amount: priced.subtotal,
+    service_fee: service,
+    total_amount: Math.round((priced.subtotal + service) * 100) / 100
+  };
+}
+
+/** Columns that record the games on a payment/registration row. One game
+ *  keeps the original single-game column; several use order_items. */
+function gameColumns(lines) {
+  if (!lines || !lines.length) return {};
+  if (lines.length === 1) return { event_item_id: lines[0].item_id };
+  return { event_item_id: null, order_items: lines.map(l => ({ item_id: l.item_id, name: l.name, plays: l.plays, unit_price: l.unit_price })) };
+}
+
+/** Game lines with names for a row (loads names for single-game rows). */
+async function describeGameOrder(row) {
+  const lines = linesFromRow(row);
+  if (!lines) return null;
+  for (const l of lines) {
+    if (!l.name) { const it = await loadEventItem(l.item_id); l.name = it ? it.name : 'Game'; }
+  }
+  // One-game rows don't store a unit price; the order's subtotal gives it.
+  const sub = Number(row.subtotal_amount ?? row.amount);
+  if (lines.length === 1 && lines[0].unit_price == null && lines[0].plays > 0 && Number.isFinite(sub) && sub > 0) {
+    lines[0].unit_price = Math.round((sub / lines[0].plays) * 100) / 100;
+  }
+  return lines;
+}
+
+/** "FIFA × 2, Ludo × 1" (one game: just its name). */
+const gamesSummary = (lines) => !lines || !lines.length ? ''
+  : lines.length === 1 ? lines[0].name
+  : lines.map(l => `${l.name} × ${l.plays}`).join(', ');
+
+/** "Game Night: FIFA" / "Game Night: FIFA × 2, Ludo × 1" for tickets, receipts and emails. */
+const titleWithGames = (event, lines) =>
+  lines && lines.length ? `${event?.title || 'Event'}: ${gamesSummary(lines)}` : (event?.title || 'Event');
 
 /** "Game Night: FIFA" style title used on tickets, receipts and emails. */
 const titleWithItem = (event, item) =>
@@ -119,6 +261,18 @@ module.exports = {
   loadEventItem,
   playsRemainingForItem,
   titleWithItem,
+  titleWithGames,
+  gamesSummary,
   playsLabel,
-  parseItemsInput
+  parseItemsInput,
+  parseGameLines,
+  linesFromRow,
+  priceGameLines,
+  gameBreakdown,
+  gameColumns,
+  describeGameOrder,
+  playsOfItemIn,
+  isMissingColumn,
+  MAX_PLAYS_PER_GAME,
+  MAX_PLAYS_PER_ORDER
 };

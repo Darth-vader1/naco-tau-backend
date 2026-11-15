@@ -953,7 +953,19 @@ async function sendNewStudentAdminNotification({ student }) {
 // ============================================
 // SEND EVENT TICKET CONFIRMATION EMAIL
 // ============================================
-async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
+const escEmail = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** "FIFA × 2 (₦500 each)" lines for game orders, as HTML and as text. */
+function gameLinesFor(games) {
+    if (!Array.isArray(games) || !games.length) return null;
+    const item = (g) => `${g.name} × ${g.plays}${g.unit_price != null ? ` (${formatNaira(g.unit_price)} each)` : ''}`;
+    return {
+        html: games.map(g => escEmail(item(g))).join('<br>'),
+        text: games.map(item).join(', ')
+    };
+}
+
+async function sendEventTicketEmail({ student, event, ticketNumber, payment, games = null }) {
     if (!student || !student.email || !event) return;
     try {
         const studentName = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'Student';
@@ -965,33 +977,43 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
         const refStr = payment?.transaction_id || payment?.reference || 'N/A';
         const ticketUrl = `${FRONTEND_URL}/events.html`;
         const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
-        const admitStr = `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
+        const gameLines = gameLinesFor(games);
+        const playsStr = `${qty} play${qty > 1 ? 's' : ''}`;
+        const admitStr = gameLines ? playsStr : `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
         const subtotalNum = Number(payment?.subtotal_amount ?? payment?.amount ?? 0);
         const serviceFeeNum = Number(payment?.service_fee || 0);
         const gatewayFeeNum = payment?.gateway_fee != null ? Number(payment.gateway_fee) : 0;
         const unitStr = qty > 1 && subtotalNum ? ` (${qty} × ${formatNaira(subtotalNum / qty)})` : '';
         const feeRows = [
-            ...(serviceFeeNum > 0 ? [{ label: 'Tickets', value: `${formatNaira(subtotalNum)}${unitStr}` }, { label: 'Service Fee', value: formatNaira(serviceFeeNum) }] : []),
+            ...(serviceFeeNum > 0 ? [{ label: gameLines ? 'Plays' : 'Tickets', value: `${formatNaira(subtotalNum)}${gameLines ? '' : unitStr}` }, { label: 'Service Fee', value: formatNaira(serviceFeeNum) }] : []),
             ...(gatewayFeeNum > 0 ? [{ label: 'Bachs Processing Fee', value: `${formatNaira(gatewayFeeNum)} (paid at checkout)` }] : [])
         ];
-        const feeText = (serviceFeeNum > 0 ? `\nTickets: ${formatNaira(subtotalNum)}\nService Fee: ${formatNaira(serviceFeeNum)}` : '') +
+        const feeText = (serviceFeeNum > 0 ? `\n${gameLines ? 'Plays' : 'Tickets'}: ${formatNaira(subtotalNum)}\nService Fee: ${formatNaira(serviceFeeNum)}` : '') +
             (gatewayFeeNum > 0 ? `\nBachs Processing Fee: ${formatNaira(gatewayFeeNum)}` : '');
 
         const metaRows = [
             { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #157a09; letter-spacing: 1px;">${ticketNumber}</strong>` },
             { label: 'Event', value: `<strong>${eventTitle}</strong>` },
             { label: 'Ticket Holder', value: studentName },
-            { label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` },
+            ...(gameLines
+                ? [{ label: 'Games', value: gameLines.html }, { label: 'Total Plays', value: `<strong>${qty}</strong>` }]
+                : [{ label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` }]),
             ...(student.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
             { label: 'Date', value: dateStr },
             { label: 'Time', value: timeStr },
             { label: 'Location / Venue', value: locationStr },
             ...feeRows,
-            { label: serviceFeeNum > 0 ? 'Total Paid' : 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${serviceFeeNum > 0 ? '' : unitStr}` },
+            { label: serviceFeeNum > 0 ? 'Total Paid' : 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${serviceFeeNum > 0 || gameLines ? '' : unitStr}` },
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
-        const ticketNotice = `
+        const ticketNotice = gameLines ? `
+            <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
+                <p style="margin: 0; font-size: 13px; color: #166534;">
+                    🎮 <strong>How to play:</strong> show this email or your ticket number <strong>${ticketNumber}</strong> at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
+                </p>
+            </div>
+        ` : `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
                     🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
@@ -1001,8 +1023,8 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
 
         const html = renderBaseLayout({
             headerBadge: 'Payment Verified & Confirmed',
-            headerTitle: '🎟️ Event Registration Ticket',
-            headerSubtitle: `Your seat is secured for ${eventTitle}`,
+            headerTitle: gameLines ? '🎮 Game Ticket' : '🎟️ Event Registration Ticket',
+            headerSubtitle: gameLines ? `Your ${playsStr} for ${eventTitle} are booked` : `Your seat is secured for ${eventTitle}`,
             contentTitle: `Hi ${studentName}, you're all set!`,
             metaRows,
             extraHtml: ticketNotice,
@@ -1015,7 +1037,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
-            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nTickets: ${qty} (${admitStr})\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}${feeText}\nTotal Paid: ${amountStr}${serviceFeeNum > 0 ? '' : unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
+            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\n${gameLines ? `Games: ${gameLines.text}\nTotal plays: ${qty}` : `Tickets: ${qty} (${admitStr})`}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}${feeText}\nTotal Paid: ${amountStr}${serviceFeeNum > 0 ? '' : unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
 
         try {
@@ -1110,7 +1132,7 @@ async function sendHackathonTeamAdminNotificationEmail({ hackathon, registration
 // ============================================
 // SEND PAYMENT ALERT TO ADMIN (nacos@tau.edu.ng)
 // ============================================
-async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber }) {
+async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber, games = null }) {
     try {
         const adminEmail = process.env.ADMIN_EMAIL || 'nacos@tau.edu.ng';
         const studentName = student?.name || `${student?.first_name || ''} ${student?.last_name || ''}`.trim() || 'Student';
@@ -1124,9 +1146,11 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
         const metaRows = [
             { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #157a09;">${amountStr}</strong>` },
             { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
-            ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && (payment?.subtotal_amount ?? payment?.amount) ? ` × ${formatNaira(Number(payment.subtotal_amount ?? payment.amount) / qty)} each` : ''}` }] : []),
+            ...(gameLinesFor(games)
+                ? [{ label: 'Games', value: gameLinesFor(games).html }, { label: 'Total Plays', value: `<strong>${qty}</strong>` }]
+                : event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && (payment?.subtotal_amount ?? payment?.amount) ? ` × ${formatNaira(Number(payment.subtotal_amount ?? payment.amount) / qty)} each` : ''}` }] : []),
             ...(Number(payment?.service_fee || 0) > 0 ? [
-                { label: 'Ticket Revenue', value: formatNaira(Number(payment.subtotal_amount ?? payment.amount)) },
+                { label: gameLinesFor(games) ? 'Game Revenue' : 'Ticket Revenue', value: formatNaira(Number(payment.subtotal_amount ?? payment.amount)) },
                 { label: 'Service Fee', value: formatNaira(Number(payment.service_fee)) }
             ] : []),
             ...(payment?.gateway_fee != null && Number(payment.gateway_fee) > 0 ? [{ label: 'Bachs Fee (paid by buyer)', value: formatNaira(Number(payment.gateway_fee)) }] : []),
