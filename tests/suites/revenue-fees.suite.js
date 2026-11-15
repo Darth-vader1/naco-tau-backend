@@ -128,9 +128,9 @@ const check = (name, cond, extra) => { console.log((cond ? 'PASS ' : 'FAIL ') + 
   reset();
   process.env.BACHS_SECRET_KEY = 'sk_live_x'; process.env.NODE_ENV = 'production';
   db.payments.push(
-    { id: 'p1', status: 'verified', transaction_id: 'chk_a', notes: '[online-checkout] Verified', gateway_fee: null, verified_at: '2026-11-10T10:00:00Z' },
-    { id: 'p2', status: 'verified', transaction_id: 'chk_b', notes: '[online-checkout] Verified', gateway_fee: null, verified_at: '2026-11-10T11:00:00Z' },
-    { id: 'p3', status: 'verified', transaction_id: 'chk_c', notes: '[online-checkout] Verified', gateway_fee: 1.5, verified_at: '2026-11-10T12:00:00Z' },
+    { id: 'p1', status: 'verified', transaction_id: 'chk_a', notes: 'Verified via Bachs (online checkout)', gateway_fee: null, verified_at: '2026-11-10T10:00:00Z' },
+    { id: 'p2', status: 'verified', transaction_id: 'chk_b', notes: 'Verified via Bachs webhook', gateway_fee: null, verified_at: '2026-11-10T11:00:00Z' },
+    { id: 'p3', status: 'verified', transaction_id: 'chk_c', notes: 'Verified via Bachs (online checkout)', gateway_fee: 1.5, verified_at: '2026-11-10T12:00:00Z' },
     { id: 'p4', status: 'verified', transaction_id: 'manual-1', notes: 'Bank transfer', gateway_fee: null, verified_at: '2026-11-10T12:00:00Z' }
   );
   gateway = {

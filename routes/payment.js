@@ -2178,7 +2178,10 @@ router.post('/refresh-gateway-fees', authenticate, requireAdmin, async (req, res
       .eq('status', 'verified')
       .is('gateway_fee', null)
       .not('transaction_id', 'is', null)
-      .ilike('notes', `%${ONLINE_CHECKOUT_MARKER}%`)
+      // Bachs references: checkout "chk_..." or charge "ch_...". (The
+      // "[online-checkout]" note is replaced when a payment is confirmed,
+      // so it can't be used to find paid orders.)
+      .ilike('transaction_id', 'ch%')
       .order('verified_at', { ascending: false })
       .limit(40);
     if (error) throw error;
