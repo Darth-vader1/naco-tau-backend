@@ -683,6 +683,28 @@ router.get('/receipt/:reference', async (req, res) => {
     const receiptGames = await describeGameOrder(payment);
     if (event && receiptGames) event = { ...event, title: titleWithGames(event, receiptGames) };
 
+    // Game tickets: plays used so far (marked by game marshals) and when.
+    let receiptGamesView = publicGames(receiptGames);
+    if (receiptGamesView && registration) {
+      const { data: usedRows, error: usedErr } = await supabase
+        .from('game_plays')
+        .select('item_id, plays, created_at')
+        .eq('registration_id', registration.id)
+        .order('created_at', { ascending: true });
+      if (usedErr) console.warn('[receipt] could not load plays used:', usedErr.message);
+      const used = usedErr ? [] : (usedRows || []);
+      receiptGamesView = receiptGamesView.map(g => {
+        const mine = used.filter(u => u.item_id === g.id);
+        const usedPlays = mine.reduce((sum, u) => sum + (u.plays || 0), 0);
+        return {
+          ...g,
+          used: usedPlays,
+          left: Math.max(0, g.plays - usedPlays),
+          used_at: mine.flatMap(u => Array(Math.max(1, u.plays || 1)).fill(u.created_at))
+        };
+      });
+    }
+
     const ticketNumber = registration?.ticket_number ||
       ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') +
        '-' + payment.id.substring(0, 6).toUpperCase());
@@ -692,7 +714,7 @@ router.get('/receipt/:reference', async (req, res) => {
     const publicPayload = {
       ticket_number: ticketNumber,
       ticket_quantity: ticketQuantity,
-      games: publicGames(receiptGames),
+      games: receiptGamesView,
       unit_price: money(Number(payment.subtotal_amount ?? payment.amount) / ticketQuantity),
       subtotal_amount: Number(payment.subtotal_amount ?? payment.amount),
       service_fee: Number(payment.service_fee || 0),
