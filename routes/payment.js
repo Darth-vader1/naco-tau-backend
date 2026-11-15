@@ -24,6 +24,7 @@ const {
   serviceFeePerTicket,
   orderBreakdown,
   gatewayFeeOf,
+  gatewayFeePaidByOf,
   money
 } = require('../utils/fees');
 const {
@@ -868,7 +869,7 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
         paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString(),
         // Bachs processing fee, if reported (naira), and who paid it
         gateway_fee: gatewayFeeOf(sessionObj),
-        gateway_fee_paid_by: sessionObj.fee_paid_by || (sessionObj.customer_bears_fee === true ? 'customer' : null)
+        gateway_fee_paid_by: gatewayFeePaidByOf(sessionObj)
       }
     };
   } catch (err) {
@@ -1655,7 +1656,7 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
     for (let from = 0; from < 50000; from += PAGE) {
       let q = supabase
         .from('payments')
-        .select('id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email')
+        .select('id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description')
         .eq('status', 'verified')
         .eq('payment_type', 'event_registration');
       if (start_date) q = q.gte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(start_date) ? `${start_date}T00:00:00.000Z` : start_date);
@@ -1689,10 +1690,35 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
     const totals = blank();
     const byEvent = {};
     const byMonth = {};
+    // Deleting an event unlinks its payments (event_id becomes null). The
+    // order description still says "Online payment for event: <title> (...)",
+    // so group those under their old title, marked as deleted.
+    const deletedTitleOf = (r) => {
+      const d = String(r.description || '');
+      const m = d.match(/^Online payment for event: (.+)$/);
+      if (!m) return null;
+      const rest = m[1].trim();
+      // Drop the trailing "(...)" order label, which can itself contain
+      // brackets, e.g. "(Fifa × 1, Ludo × 1 (2 plays))".
+      let cut = -1;
+      if (rest.endsWith(')')) {
+        let depth = 0;
+        for (let i = rest.length - 1; i >= 0; i--) {
+          if (rest[i] === ')') depth++;
+          else if (rest[i] === '(' && --depth === 0) { cut = i; break; }
+        }
+      }
+      return (cut > 0 ? rest.slice(0, cut) : rest).trim() || null;
+    };
     for (const r of rows) {
       add(totals, r);
-      const ek = r.event_id || 'none';
-      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: titles[r.event_id]?.title || 'Unknown event', date: titles[r.event_id]?.date || null, ...blank() };
+      let ek = r.event_id || 'none';
+      let title = titles[r.event_id]?.title;
+      if (!title) {
+        const old = deletedTitleOf(r);
+        if (old) { ek = `deleted:${old}`; title = `${old} (deleted event)`; }
+      }
+      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: title || 'Unknown event (deleted)', date: titles[r.event_id]?.date || null, deleted: !titles[r.event_id], ...blank() };
       add(byEvent[ek], r);
       const mk = String(r.verified_at || r.submitted_at || '').slice(0, 7) || 'unknown';
       byMonth[mk] = byMonth[mk] || { month: mk, ...blank() };
@@ -2134,6 +2160,66 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 // PAYMENT WEBHOOK LISTENER (Bachs & Paystack)
 // ============================================
+// ============================================
+// FETCH MISSING BACHS FEES (admin)
+// ============================================
+// Older orders were saved before the Bachs fee was read from the right place,
+// and Bachs only reports the fee once a payment settles. This asks Bachs again
+// for up to 40 paid online orders that have no fee recorded.
+router.post('/refresh-gateway-fees', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const bachsSecret = process.env.BACHS_SECRET_KEY;
+    if (!isBachsKeyConfigured(bachsSecret)) return errorResponse(res, 'Bachs is not configured on the server.', 503);
+    const baseUrl = bachsSecret.startsWith('sk_live_') ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
+
+    const { data: rows, error } = await supabase
+      .from('payments')
+      .select('id, transaction_id, notes')
+      .eq('status', 'verified')
+      .is('gateway_fee', null)
+      .not('transaction_id', 'is', null)
+      .ilike('notes', `%${ONLINE_CHECKOUT_MARKER}%`)
+      .order('verified_at', { ascending: false })
+      .limit(40);
+    if (error) throw error;
+
+    let updated = 0; let notFound = 0; let noFeeYet = 0;
+    for (const p of rows || []) {
+      const ref = String(p.transaction_id);
+      const url = ref.startsWith('chk_')
+        ? `${baseUrl}/v1/checkout-sessions/${encodeURIComponent(ref)}`
+        : `${baseUrl}/v1/payments/${encodeURIComponent(ref)}`;
+      try {
+        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${bachsSecret}`, 'Content-Type': 'application/json' } });
+        if (!resp.ok) { notFound += 1; continue; }
+        const j = await resp.json().catch(() => null);
+        const obj = (j && (j.data || j)) || {};
+        const fee = gatewayFeeOf(obj);
+        if (fee == null) { noFeeYet += 1; continue; }
+        const paidBy = gatewayFeePaidByOf(obj);
+        const { error: upErr } = await supabase
+          .from('payments')
+          .update({ gateway_fee: fee, ...(paidBy ? { gateway_fee_paid_by: paidBy } : {}) })
+          .eq('id', p.id)
+          .is('gateway_fee', null);
+        if (upErr) throw upErr;
+        updated += 1;
+      } catch (e) {
+        console.warn(`[Bachs] fee refresh failed for ${ref}:`, e.message);
+        notFound += 1;
+      }
+    }
+    if (updated) {
+      await auditLog({ action: 'gateway_fees_refreshed', userId: req.userId, details: { checked: (rows || []).length, updated }, ip: req.ip });
+    }
+    return successResponse(res, { checked: (rows || []).length, updated, no_fee_yet: noFeeYet, not_found: notFound },
+      `${updated} order(s) updated with their Bachs fee`);
+  } catch (error) {
+    console.error('[Bachs] refresh fees error:', error);
+    return errorResponse(res, 'Could not fetch Bachs fees', 500, error);
+  }
+});
+
 // ============================================
 // MARK ABANDONED CHECKOUTS
 // ============================================

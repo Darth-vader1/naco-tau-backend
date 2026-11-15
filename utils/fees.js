@@ -74,11 +74,23 @@ function orderBreakdown({ unitPrice, quantity, feePerTicket }) {
   };
 }
 
-/** Bachs processing fee reported on a gateway object, if any (in naira). */
+/**
+ * Bachs processing fee on a gateway object, if reported (in naira).
+ * Bachs reports it on the payment: `fees.amount` on a payment, or
+ * `charge.fees.amount` on a checkout session (the session itself has none).
+ * It can be null until the payment settles.
+ */
 function gatewayFeeOf(obj = {}) {
-  const raw = obj.fees?.amount ?? obj.fee ?? obj.processing_fee ?? obj.fees_amount;
+  const charge = (obj && typeof obj.charge === 'object' && obj.charge) || {};
+  const raw = obj.fees?.amount ?? charge.fees?.amount ?? obj.fee ?? charge.fee ?? obj.processing_fee ?? obj.fees_amount;
   const n = parseFloat(raw);
   return Number.isFinite(n) ? money(n) : null;
+}
+
+/** Who paid the Bachs fee: 'merchant', 'platform', 'customer' or null. */
+function gatewayFeePaidByOf(obj = {}) {
+  const charge = (obj && typeof obj.charge === 'object' && obj.charge) || {};
+  return obj.fee_paid_by || charge.fee_paid_by || (obj.customer_bears_fee === true ? 'customer' : null);
 }
 
 module.exports = {
@@ -87,5 +99,6 @@ module.exports = {
   serviceFeePerTicket,
   orderBreakdown,
   gatewayFeeOf,
+  gatewayFeePaidByOf,
   money
 };
