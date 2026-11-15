@@ -50,6 +50,7 @@
 | 023 | `023_ticket_fees.sql` | `fee_settings` (service fee per ticket, buyer pays Bachs fee); `events.service_fee_override`; payment breakdown columns (`subtotal_amount`, `service_fee`, `gateway_fee`) | ⬜ Pending — run BEFORE deploying the ticket-fees code |
 | 024 | `024_event_games.sql` | `event_items` (games per event, price per play, optional guest price and play limit); `event_item_id` on `payments` and `event_registrations` | ⬜ Pending — run BEFORE deploying the games code |
 | 025 | `025_multi_game_orders.sql` | `order_items` (JSONB list of games and plays) on `payments` and `event_registrations`, for orders with several games | ⬜ Pending — run BEFORE deploying the multi-game code |
+| 026 | `026_game_marshals.sql` | `game_marshals` (appointed per event, start/end time), `game_plays` (plays marked used), `redeem_game_play()` (locks the ticket so plays can't go below zero) | ⬜ Pending — run BEFORE deploying the game marshal code |
 
 ---
 

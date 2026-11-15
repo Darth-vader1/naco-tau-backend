@@ -63,7 +63,22 @@ async function syncAttendeeCount(eventId) {
   }
 }
 
+/**
+ * Deterministic ticket number for a paid order: "NACOS-<event 4>-<payment 6>".
+ * Shared by tickets, receipts and game marshal look-ups so they always agree.
+ */
+const ticketNumberFor = (eventId, paymentId) =>
+  'NACOS-' + String(eventId).substring(0, 4).toUpperCase() + '-' + String(paymentId).substring(0, 6).toUpperCase();
+
+/** Parse a typed or scanned ticket number. Returns { eventPart, paymentPart } or null. */
+function parseTicketNumber(raw) {
+  const m = String(raw || '').toUpperCase().replace(/\s+/g, '').match(/^NACOS-([0-9A-F]{4})-([0-9A-F]{6})$/);
+  return m ? { eventPart: m[1], paymentPart: m[2] } : null;
+}
+
 module.exports = {
+  ticketNumberFor,
+  parseTicketNumber,
   MAX_TICKETS_PER_ORDER,
   parseTicketQuantity,
   quantityOf,

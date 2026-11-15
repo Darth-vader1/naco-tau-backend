@@ -1010,7 +1010,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
         const ticketNotice = gameLines ? `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
-                    🎮 <strong>How to play:</strong> show this email or your ticket number <strong>${ticketNumber}</strong> at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
+                    🎮 <strong>How to play:</strong> tap <strong>Open My QR Ticket</strong> below and show the QR code (or your ticket number <strong>${ticketNumber}</strong>) at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
                 </p>
             </div>
         ` : `
@@ -1028,8 +1028,8 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
             contentTitle: `Hi ${studentName}, you're all set!`,
             metaRows,
             extraHtml: ticketNotice,
-            buttonText: 'View Events Portal',
-            buttonUrl: ticketUrl,
+            buttonText: gameLines && refStr !== 'N/A' ? 'Open My QR Ticket' : 'View Events Portal',
+            buttonUrl: gameLines && refStr !== 'N/A' ? `${FRONTEND_URL}/receipt.html?reference=${encodeURIComponent(refStr)}` : ticketUrl,
             noticeText: 'Please keep this email for your records.'
         });
 
@@ -1068,6 +1068,55 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
 // ============================================
 // Recipients: HACKATHON_ALERT_EMAILS (comma-separated) if set, otherwise the
 // same people who get payment alerts.
+/**
+ * Invitation for a student appointed as a game marshal for one event.
+ */
+async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) {
+    if (!student || !student.email || !event) return { success: false, error: 'missing details' };
+    try {
+        const name = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'there';
+        const fmt = (d) => new Date(d).toLocaleString('en-NG', { timeZone: 'Africa/Lagos', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+        const fromStr = fmt(startsAt);
+        const toStr = fmt(endsAt);
+        const title = escEmail(event.title || 'Game Night');
+        const dashboardUrl = `${FRONTEND_URL}/student-dashboard.html`;
+
+        const html = renderBaseLayout({
+            headerBadge: 'Game Marshal Invitation',
+            headerTitle: '🎮 You are a Game Marshal',
+            headerSubtitle: `For ${title}`,
+            contentTitle: `Hi ${escEmail(name)}, you've been appointed as a game marshal.`,
+            metaRows: [
+                { label: 'Event', value: `<strong>${title}</strong>` },
+                ...(event.location ? [{ label: 'Venue', value: escEmail(event.location) }] : []),
+                { label: 'From', value: escEmail(fromStr) },
+                { label: 'Until', value: escEmail(toStr) }
+            ],
+            extraHtml: `
+                <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; font-size: 13px; color: #166534;">
+                    <strong>What to do:</strong> sign in to the NACOS portal with your school email as usual.
+                    During the times above, a <strong>Game Marshal</strong> section appears on your dashboard.
+                    Open it, then scan each player's ticket QR code (or type their ticket number) and tap
+                    <strong>Mark 1 play</strong> when they play a game. The section closes automatically when your time ends.
+                </div>
+            `,
+            buttonText: 'Open My Dashboard',
+            buttonUrl: dashboardUrl,
+            noticeText: 'If you did not expect this, you can ignore this email or tell a NACOS admin.'
+        });
+
+        return await sendEmail({
+            to: student.email,
+            subject: `🎮 Game Marshal for ${event.title || 'Game Night'} — NACOS TAU`,
+            html,
+            text: `Hi ${name},\n\nYou have been appointed as a game marshal for "${event.title || 'Game Night'}".\nFrom: ${fromStr}\nUntil: ${toStr}\n\nSign in to the NACOS portal with your school email. During these times a Game Marshal section appears on your dashboard: scan each player's ticket QR code (or type the ticket number) and mark plays as they play.\n\n${dashboardUrl}\n\nNACOS TAU Chapter`
+        });
+    } catch (err) {
+        console.error('Failed to send game marshal invitation:', err);
+        return { success: false, error: err.message };
+    }
+}
+
 async function sendHackathonTeamAdminNotificationEmail({ hackathon, registration, leader, teammates = [] }) {
     try {
         const configured = String(process.env.HACKATHON_ALERT_EMAILS || '')
@@ -1431,6 +1480,7 @@ module.exports = {
     sendEventTicketEmail,
     sendPaymentAdminNotificationEmail,
     sendHackathonTeamAdminNotificationEmail,
+    sendGameMarshalInviteEmail,
     getActiveStudents,
     getEmailTemplate,
     logNotification,

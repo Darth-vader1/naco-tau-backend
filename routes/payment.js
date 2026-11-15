@@ -1524,10 +1524,12 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
         ticket_quantity: quantity
       },
       guest: { name: settled.guest_name, email: settled.guest_email },
-      event: await (async () => {
+      ...await (async () => {
         const summary = publicEventSummary(event);
         const gLines = await describeGameOrder(settled);
-        return gLines ? { ...summary, title: titleWithGames(event, gLines) } : summary;
+        return gLines
+          ? { event: { ...summary, title: titleWithGames(event, gLines) }, games: publicGames(gLines) }
+          : { event: summary, games: null };
       })()
     }, 'Payment confirmed. Your ticket has been emailed to you.');
   } catch (error) {
