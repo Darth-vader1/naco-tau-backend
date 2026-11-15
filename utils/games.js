@@ -13,6 +13,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const isUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
 
+// Migration 024 not run yet. Postgres says 42P01; Supabase's REST layer says
+// PGRST205 ("Could not find the table ... in the schema cache").
+const isMissingTable = (error) => !!error && (
+  error.code === '42P01' || error.code === 'PGRST205' ||
+  (/event_items/.test(error.message || '') && /does not exist|could not find/i.test(error.message || ''))
+);
+
 /** Games for an event, in display order. */
 async function loadEventItems(eventId, { activeOnly = true } = {}) {
   let q = supabase
@@ -25,7 +32,7 @@ async function loadEventItems(eventId, { activeOnly = true } = {}) {
   const { data, error } = await q;
   if (error) {
     // Table not created yet (migration 024 not run): behave as "no games".
-    if (error.code === '42P01' || /event_items/.test(error.message || '') && /does not exist/.test(error.message || '')) return [];
+    if (isMissingTable(error)) return [];
     throw error;
   }
   return data || [];
@@ -35,7 +42,7 @@ async function loadEventItems(eventId, { activeOnly = true } = {}) {
 async function loadEventItem(itemId) {
   if (!isUuid(itemId)) return null;
   const { data, error } = await supabase.from('event_items').select('*').eq('id', itemId).maybeSingle();
-  if (error) throw error;
+  if (error) { if (isMissingTable(error)) return null; throw error; }
   return data || null;
 }
 
