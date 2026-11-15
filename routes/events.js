@@ -6,6 +6,8 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { triggerAutoContentBroadcast } = require('../services/email');
+const { auditLog } = require('../middleware/audit');
+const { isUuid, loadEventItems, parseItemsInput } = require('../utils/games');
 
 // ============================================
 // GET UPCOMING EVENTS
@@ -155,6 +157,105 @@ router.get('/:id', async (req, res) => {
   } catch (error) {
     console.error('Event fetch error:', error);
     return errorResponse(res, 'Failed to fetch event', 500, error);
+  }
+});
+
+// ============================================
+// GAMES (pay per play) FOR AN EVENT
+// ============================================
+// Public: the active games and their prices per play.
+router.get('/:id/items', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+    const items = await loadEventItems(id, { activeOnly: true });
+    return successResponse(res, items, 'Games retrieved successfully');
+  } catch (error) {
+    console.error('Event games fetch error:', error);
+    return errorResponse(res, 'Failed to fetch games', 500, error);
+  }
+});
+
+// Admin: replace the event's list of games.
+// Body: { items: [{ id?, name, price, public_price?, max_plays?, description?, is_active? }] }
+// Games left out of the list are hidden (kept, so past orders still show the
+// game name). An empty list turns the event back into a normal ticketed event.
+router.put('/:id/items', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+
+    const parsed = parseItemsInput(req.body?.items);
+    if (parsed.error) return errorResponse(res, parsed.error, 400);
+
+    const { data: event, error: evErr } = await supabase.from('events').select('id').eq('id', id).maybeSingle();
+    if (evErr) throw evErr;
+    if (!event) return errorResponse(res, 'Event not found', 404);
+
+    const existing = await loadEventItems(id, { activeOnly: false });
+    const existingIds = new Set(existing.map(i => i.id));
+    const now = new Date().toISOString();
+    const keptIds = new Set();
+
+    for (const it of parsed.items) {
+      const row = {
+        name: it.name,
+        description: it.description,
+        price: it.price,
+        public_price: it.public_price,
+        max_plays: it.max_plays,
+        sort_order: it.sort_order,
+        is_active: it.is_active,
+        updated_at: now
+      };
+      if (it.id && existingIds.has(it.id)) {
+        const { error } = await supabase.from('event_items').update(row).eq('id', it.id).eq('event_id', id);
+        if (error) throw error;
+        keptIds.add(it.id);
+      } else {
+        const { data: created, error } = await supabase
+          .from('event_items')
+          .insert([{ ...row, event_id: id }])
+          .select('id')
+          .single();
+        if (error) throw error;
+        keptIds.add(created.id);
+      }
+    }
+
+    const removed = existing.filter(i => !keptIds.has(i.id) && i.is_active).map(i => i.id);
+    if (removed.length) {
+      const { error } = await supabase.from('event_items').update({ is_active: false, updated_at: now }).in('id', removed);
+      if (error) throw error;
+    }
+
+    // Keep the event's own price fields in step so the events list, the
+    // "from ₦X" badge and the existing paid-event checks keep working:
+    // payment_amount = cheapest member price, public_price = cheapest guest price.
+    const active = await loadEventItems(id, { activeOnly: true });
+    if (active.length) {
+      const minMember = Math.min(...active.map(i => Number(i.price)));
+      const guestPrices = active.map(i => Number(i.public_price)).filter(p => Number.isFinite(p) && p > 0);
+      const { error } = await supabase.from('events').update({
+        requires_payment: true,
+        payment_amount: minMember,
+        public_price: guestPrices.length ? Math.min(...guestPrices) : null,
+        updated_at: now
+      }).eq('id', id);
+      if (error) throw error;
+    }
+
+    await auditLog({
+      action: 'event_games_updated',
+      userId: req.userId,
+      details: { event_id: id, games: active.map(i => ({ id: i.id, name: i.name, price: i.price })) },
+      ip: req.ip
+    });
+
+    return successResponse(res, active, 'Games saved');
+  } catch (error) {
+    console.error('Event games update error:', error);
+    return errorResponse(res, 'Failed to save games', 500, error);
   }
 });
 
