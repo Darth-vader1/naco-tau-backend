@@ -7,6 +7,7 @@ const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
 const crypto = require('crypto');
+const { markAbandonedCheckouts, maybeMarkAbandonedCheckouts } = require('../utils/abandonedCheckouts');
 const rateLimit = require('express-rate-limit');
 const { registerLimiter } = require('../middleware/rateLimitInstances');
 const {
@@ -965,7 +966,7 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
     // fee) quoted when it started, so a later price or fee change can't break a
     // paid order. Without one, price it now with the current fee settings.
     const fromRecordedCheckout = !!(existingPayment && isOnlineCheckoutRow(existingPayment) &&
-      existingPayment.status === 'pending' && Number(existingPayment.amount) > 0);
+      (existingPayment.status === 'pending' || existingPayment.status === 'abandoned') && Number(existingPayment.amount) > 0);
     const feeSettings = await getFeeSettings();
     const priced = fromRecordedCheckout
       ? {
@@ -1882,6 +1883,7 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 router.get('/', authenticate, requireAdmin, async (req, res) => {
   try {
+    maybeMarkAbandonedCheckouts(); // tidy stale unpaid checkouts (at most hourly, never blocks)
     const { status, payment_type } = req.query;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
@@ -2132,6 +2134,35 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 // PAYMENT WEBHOOK LISTENER (Bachs & Paystack)
 // ============================================
+// ============================================
+// MARK ABANDONED CHECKOUTS
+// ============================================
+// Called daily by Vercel Cron (Authorization: Bearer CRON_SECRET), or by an
+// admin. Marks online checkouts still unpaid after 24h as "abandoned".
+const cronOrAdmin = (req, res, next) => {
+  const secret = process.env.CRON_SECRET;
+  const header = req.headers.authorization || '';
+  if (secret && header.length === `Bearer ${secret}`.length && safeEqual(header, `Bearer ${secret}`)) {
+    req.viaCron = true;
+    return next();
+  }
+  return authenticate(req, res, () => requireAdmin(req, res, next));
+};
+const runAbandonCleanup = async (req, res) => {
+  try {
+    const result = await markAbandonedCheckouts();
+    if (result.marked) {
+      await auditLog({ action: 'checkouts_marked_abandoned', userId: req.userId || null, details: { ...result, via: req.viaCron ? 'cron' : 'admin' }, ip: req.ip });
+    }
+    return successResponse(res, result, `${result.marked} unpaid checkout(s) marked abandoned`);
+  } catch (error) {
+    console.error('[checkouts] cleanup error:', error);
+    return errorResponse(res, 'Could not clean up abandoned checkouts', 500, error);
+  }
+};
+router.get('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
+router.post('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
+
 router.post('/webhook', async (req, res) => {
   const bachsSecret = process.env.BACHS_SECRET_KEY;
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;

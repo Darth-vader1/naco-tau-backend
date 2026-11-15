@@ -4,12 +4,13 @@
 1. Open your Supabase project → **SQL Editor**
 2. Paste the contents of the migration file
 3. Click **Run**
-4. Record it in `schema_migrations`:
+4. Newer migrations (020 onwards) record themselves in `schema_migrations`
+   (`version`, `name`, `applied_at`) at the end of the file, so there is
+   nothing extra to run. Check with:
    ```sql
-   INSERT INTO schema_migrations (filename, description)
-   VALUES ('NNN_your_migration', 'What it does')
-   ON CONFLICT (filename) DO NOTHING;
+   SELECT version, name, applied_at FROM schema_migrations ORDER BY applied_at;
    ```
+5. Update the **Status** column below the same day.
 
 ## Numbering convention
 - Sequential: `NNN_description.sql` (zero-padded to 3 digits)
@@ -22,7 +23,7 @@
 
 | # | File | Description | Status |
 |---|------|-------------|--------|
-| 000 | `000_create_schema_migrations.sql` | Creates this tracking table + backfills history | ⬜ Run first if not applied |
+| 000 | `000_create_schema_migrations.sql` | Creates this tracking table + backfills history | ✅ Applied (the `schema_migrations` table exists) |
 | 001 | `001_payments_event_link.sql` | Link payments → events via `event_id` FK | ✅ Applied |
 | 002 | `002_add_past_questions_payment_verification.sql` | Add `past_questions` and `payment_verification` tables | ✅ Applied |
 | 003 | `003_fix_schema_mismatches.sql` | Fix schema mismatches from initial deploy | ✅ Applied |
@@ -43,14 +44,14 @@
 | 014 | `014_fix_level_display_issue.sql` | Fix `current_level` display calculation in view | ✅ Applied |
 | 015 | `015_fix_all_student_data_issues.sql` | Bulk fix student data quality issues | ✅ Applied |
 | 016 | `016_fix_double_encoded_skills_interests.sql` | Fix double-encoded JSON in skills/interests arrays | ✅ Applied |
-| 017 | `017_add_payments_transaction_id_index.sql` | Index on `payments.transaction_id` for receipt lookups | ⬜ Pending — run in Supabase SQL Editor |
-| 020 | `020_close_student_pii_and_payment_replay.sql` | Drop `students_directory_read` (PII leak), `security_invoker` on level view, unique `payments.transaction_id` | ⬜ Pending — run in Supabase SQL Editor |
-| 021 | `021_event_ticket_quantity.sql` | `ticket_quantity` on payments + event_registrations; create + re-sync `events.current_attendees` in tickets | ⬜ Pending — run BEFORE deploying the multi-ticket code |
-| 022 | `022_repeat_orders_and_guest_checkout.sql` | `allow_repeat_orders`, `open_to_public`, `public_price` on events; one registration per order; guest buyer columns | ⬜ Pending — run after 021, BEFORE deploying |
-| 023 | `023_ticket_fees.sql` | `fee_settings` (service fee per ticket, buyer pays Bachs fee); `events.service_fee_override`; payment breakdown columns (`subtotal_amount`, `service_fee`, `gateway_fee`) | ⬜ Pending — run BEFORE deploying the ticket-fees code |
-| 024 | `024_event_games.sql` | `event_items` (games per event, price per play, optional guest price and play limit); `event_item_id` on `payments` and `event_registrations` | ⬜ Pending — run BEFORE deploying the games code |
-| 025 | `025_multi_game_orders.sql` | `order_items` (JSONB list of games and plays) on `payments` and `event_registrations`, for orders with several games | ⬜ Pending — run BEFORE deploying the multi-game code |
-| 026 | `026_game_marshals.sql` | `game_marshals` (appointed per event, start/end time), `game_plays` (plays marked used), `redeem_game_play()` (locks the ticket so plays can't go below zero) | ⬜ Pending — run BEFORE deploying the game marshal code |
+| 017 | `017_add_payments_transaction_id_index.sql` | Index on `payments.transaction_id` for receipt lookups | ✅ Not needed: covered by 020 (its unique constraint on `transaction_id` is also an index). Safe to run anyway. |
+| 020 | `020_close_student_pii_and_payment_replay.sql` | Drop `students_directory_read` (PII leak), `security_invoker` on level view, unique `payments.transaction_id` | ✅ Applied (Nov 2026) |
+| 021 | `021_event_ticket_quantity.sql` | `ticket_quantity` on payments + event_registrations; create + re-sync `events.current_attendees` in tickets | ✅ Applied (Nov 2026) |
+| 022 | `022_repeat_orders_and_guest_checkout.sql` | `allow_repeat_orders`, `open_to_public`, `public_price` on events; one registration per order; guest buyer columns | ✅ Applied (Nov 2026) |
+| 023 | `023_ticket_fees.sql` | `fee_settings` (service fee per ticket, buyer pays Bachs fee); `events.service_fee_override`; payment breakdown columns (`subtotal_amount`, `service_fee`, `gateway_fee`) | ✅ Applied (Nov 2026) |
+| 024 | `024_event_games.sql` | `event_items` (games per event, price per play, optional guest price and play limit); `event_item_id` on `payments` and `event_registrations` | ✅ Applied 15 Nov 2026 |
+| 025 | `025_multi_game_orders.sql` | `order_items` (JSONB list of games and plays) on `payments` and `event_registrations`, for orders with several games | ✅ Applied 15 Nov 2026 |
+| 026 | `026_game_marshals.sql` | `game_marshals` (appointed per event, start/end time), `game_plays` (plays marked used), `redeem_game_play()` (locks the ticket so plays can't go below zero) | ✅ Applied 15 Nov 2026 |
 
 ---
 

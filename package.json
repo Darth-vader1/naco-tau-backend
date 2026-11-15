@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed": "node scripts/seed-admin.js",
-    "test": "jest",
+    "test": "node tests/run.js",
     "migrate": "node scripts/migrate.js",
     "migrate:007": "node scripts/migrate-007.js",
     "migrate:010": "node scripts/migrate-010-audit-logs.js",
