@@ -2,6 +2,7 @@
 const nodemailer = require('nodemailer');
 const { supabase } = require('../config/supabase');
 const { formatPrizePool: formatPrizeText } = require('../utils/prizeFormat');
+const { recordEmailSend } = require('../utils/emailUsage');
 
 // ============================================
 // INITIALIZE NODEMAILER (SMTP)
@@ -73,8 +74,9 @@ async function getGmailAccessToken() {
 }
 
 async function sendEmail({ to, bcc, subject, html, text }) {
+    let mailOptions = null;
     try {
-        const mailOptions = {
+        mailOptions = {
             from: `NACOS TAU <${EMAIL_FROM}>`,
             subject: subject,
             html: html,
@@ -131,10 +133,13 @@ async function sendEmail({ to, bcc, subject, html, text }) {
         }
 
         console.log(`✅ Email sent to ${recipientCount} recipient(s) [ID: ${info.messageId}]`);
+        // Count it towards the Gmail daily limit meter (never blocks or throws).
+        await recordEmailSend({ to: mailOptions.to, bcc: mailOptions.bcc, subject, ok: true });
         return { success: true, data: info };
 
     } catch (error) {
         console.error('❌ Email send error:', error);
+        if (mailOptions) await recordEmailSend({ to: mailOptions.to, bcc: mailOptions.bcc, subject, ok: false, error: error && error.message });
         throw error;
     }
 }

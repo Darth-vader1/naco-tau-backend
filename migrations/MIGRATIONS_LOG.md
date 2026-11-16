@@ -55,6 +55,7 @@
 | 027 | `027_homepage_cms.sql` | `executives` (current executive team cards) and `site_settings` (single-row homepage copy, dues/bank info, inquiry contacts) for the Homepage CMS | ✅ Applied 16 Nov 2026 (tables present) |
 | 028 | `028_realtime_site_updates.sql` | Switch on Supabase Realtime for `events`, `past_questions`, `timetables` (site "new content" pop-ups); existing RLS still applies | ✅ Applied 16 Nov 2026 |
 | 029 | `029_payment_archive.sql` | `archived_at`, `archived_by`, `archive_reason` on `payments` (soft delete, e.g. test payments; left out of revenue and stats) | ✅ Applied 16 Nov 2026 |
+| 030 | `030_email_send_log.sql` | `email_send_log`: one row per email sent (counts and hashed recipients only) for the Gmail daily-limit meter | ✅ Applied 16 Nov 2026 |
 
 ---
 

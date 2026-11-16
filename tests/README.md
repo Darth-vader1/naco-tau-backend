@@ -29,6 +29,7 @@ real is touched**: no Supabase, Redis, Bachs or email. A suite prints one
 | `hackathon-team-size` | Team size counts each person once; admin email on new teams |
 | `rate-limiters` | Route rate limits switch to the shared Redis store |
 | `session-tracking` | Session tracking reuses the cached login check |
+| `email-usage` | Every email is counted for the Gmail limit meter: recipients, outside and unique recipients, rolling 24 hours, warning/over status, no addresses stored, works before migration 030 |
 | `email-recipients` | Admin payment alerts go to `PAYMENT_ALERT_EMAILS` or nacos@tau.edu.ng + `ADMIN_EMAIL`; no personal address is hardcoded |
 | `prize-email` | Prize pool amounts formatted in naira in emails |
 | `revenue-fees` | Bachs fee read from the payment inside a checkout, fee backfill for past orders, deleted events keep their name in the revenue report |

@@ -4,6 +4,7 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { errorResponse, successResponse } = require('../utils/helpers');
+const { getEmailUsage } = require('../utils/emailUsage');
 const { sendBulkEmail, getEmailTemplate, getActiveStudents, sendProfileUpdateReminderEmail, checkAndSendProfileReminders } = require('../services/email');
 const { instances: { apiLimiter: broadcastLimiter } } = require('../middleware/rateLimitInstances');
 
@@ -254,6 +255,23 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
     events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     return events;
 }
+
+/**
+ * @route   GET /api/emails/usage
+ * @desc    How much of Gmail's sending limit has been used over the rolling
+ *          last 24 hours, plus emails sent per day (all kinds of email).
+ * @access  Private/Admin
+ */
+router.get('/usage', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 30));
+        const usage = await getEmailUsage({ days });
+        return successResponse(res, usage, usage.available ? 'Email usage' : 'Email usage tracking needs migration 030');
+    } catch (error) {
+        console.error('Email usage error:', error);
+        return errorResponse(res, 'Could not load email usage', 500);
+    }
+});
 
 /**
  * @route   GET /api/emails/analytics
