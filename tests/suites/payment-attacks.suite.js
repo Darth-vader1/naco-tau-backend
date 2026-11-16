@@ -271,7 +271,7 @@ const msg = (r) => (r.body && (r.body.error || r.body.message)) || '';
   check('F2 an ordinary admin changing the service fee refused (super admin only)', r.status === 403, r.status);
   r = await call('/fee-settings', 'boss', { member_service_fee: -50 }, 'PUT', { 'x-admin': '1', 'x-super': '1' });
   check('F3 a negative service fee refused even for super admins', r.status === 400, { s: r.status, b: r.body });
-  for (const [m, p] of [['GET', '/'], ['GET', '/revenue'], ['GET', '/export/csv'], ['GET', '/stats'], ['POST', '/refresh-gateway-fees'], ['POST', '/11111111-1111-4111-8111-111111111111/gateway-recheck']]) {
+  for (const [m, p] of [['GET', '/'], ['GET', '/revenue'], ['GET', '/export/csv'], ['GET', '/stats'], ['POST', '/refresh-gateway-fees'], ['POST', '/archive'], ['POST', '/unarchive'], ['POST', '/11111111-1111-4111-8111-111111111111/gateway-recheck']]) {
     r = await call(p, 'u1', m === 'GET' ? null : {}, m);
     check(`F4 student calling admin route ${m} ${p} refused`, r.status === 403, r.status);
   }

@@ -1122,10 +1122,10 @@ async function sendHackathonTeamAdminNotificationEmail({ hackathon, registration
         const configured = String(process.env.HACKATHON_ALERT_EMAILS || '')
             .split(',').map(e => e.trim()).filter(Boolean);
         const adminEmail = process.env.ADMIN_EMAIL;
-        const recipients = configured.length
-            ? configured
-            : ['nacos@tau.edu.ng', 'olufemi-abiodun.gbolahan@st.tau.edu.ng'];
-        if (!configured.length && adminEmail && !recipients.includes(adminEmail)) recipients.push(adminEmail);
+        // HACKATHON_ALERT_EMAILS if set, otherwise nacos@tau.edu.ng + ADMIN_EMAIL.
+        // No personal addresses in code.
+        const recipients = configured.length ? configured : ['nacos@tau.edu.ng'];
+        if (!configured.length && adminEmail && !recipients.includes(String(adminEmail).trim().toLowerCase())) recipients.push(String(adminEmail).trim());
 
         const hackTitle = hackathon?.title || 'Hackathon';
         const teamName = registration?.team_name || 'New team';
@@ -1230,10 +1230,13 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
             noticeText: 'NACOS TAU Financial & Administrative Notification'
         });
 
-        // Always notify nacos@tau.edu.ng, olufemi-abiodun.gbolahan@st.tau.edu.ng, and custom ADMIN_EMAIL
-        const recipients = ['nacos@tau.edu.ng', 'olufemi-abiodun.gbolahan@st.tau.edu.ng'];
-        if (adminEmail && adminEmail !== 'nacos@tau.edu.ng' && adminEmail !== 'olufemi-abiodun.gbolahan@st.tau.edu.ng') {
-            recipients.push(adminEmail);
+        // Recipients: PAYMENT_ALERT_EMAILS (comma-separated) if set, otherwise
+        // nacos@tau.edu.ng plus ADMIN_EMAIL. No personal addresses in code.
+        const configured = String(process.env.PAYMENT_ALERT_EMAILS || '')
+            .split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+        const recipients = configured.length ? configured : ['nacos@tau.edu.ng'];
+        if (!configured.length && adminEmail && !recipients.includes(String(adminEmail).trim().toLowerCase())) {
+            recipients.push(String(adminEmail).trim());
         }
 
         return await sendEmail({

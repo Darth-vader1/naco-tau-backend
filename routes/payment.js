@@ -171,6 +171,17 @@ const simulationSession = (res, price, eventId, reason) => successResponse(res, 
 const ONLINE_CHECKOUT_MARKER = '[online-checkout]';
 const isOnlineCheckoutRow = (p) => !!p && typeof p.notes === 'string' && p.notes.includes(ONLINE_CHECKOUT_MARKER);
 
+// Archived (soft-deleted) payments, e.g. test orders: migration 029. The
+// column is detected (and the answer cached for 5 minutes) so reports keep
+// working before the migration has been run.
+let archiveSupport = { ok: false, at: 0 };
+async function archiveColumnExists() {
+  if (archiveSupport.at && Date.now() - archiveSupport.at < 300000) return archiveSupport.ok;
+  const { error } = await supabase.from('payments').select('archived_at').limit(1);
+  archiveSupport = { ok: !error, at: Date.now() };
+  return archiveSupport.ok;
+}
+
 const frontendBase = () => process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',')[0].trim() : 'https://nacosportal.vercel.app';
 const receiptUrlFor = (reference) => `${frontendBase()}/receipt.html?reference=${encodeURIComponent(reference)}`;
 
@@ -1670,14 +1681,18 @@ router.put('/fee-settings', authenticate, requireSuperAdmin, async (req, res) =>
 router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
   try {
     const { start_date, end_date } = req.query;
+    const includeArchived = req.query.include_archived === '1' || req.query.include_archived === 'true';
+    const hasArchive = await archiveColumnExists();
     const PAGE = 1000;
     const rows = [];
     for (let from = 0; from < 50000; from += PAGE) {
       let q = supabase
         .from('payments')
-        .select('id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description')
+        .select(`id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description${hasArchive ? ', archived_at, archive_reason' : ''}`)
         .eq('status', 'verified')
         .eq('payment_type', 'event_registration');
+      // Archived (test) orders never count; they're only listed when asked for.
+      if (hasArchive && !includeArchived) q = q.is('archived_at', null);
       if (start_date) q = q.gte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(start_date) ? `${start_date}T00:00:00.000Z` : start_date);
       if (end_date) q = q.lte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(end_date) ? `${end_date}T23:59:59.999Z` : end_date);
       const { data, error } = await q.order('verified_at', { ascending: false }).range(from, from + PAGE - 1);
@@ -1730,15 +1745,19 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
       return (cut > 0 ? rest.slice(0, cut) : rest).trim() || null;
     };
     for (const r of rows) {
-      add(totals, r);
+      const archived = !!r.archived_at;
+      if (!archived) add(totals, r);
       let ek = r.event_id || 'none';
       let title = titles[r.event_id]?.title;
       if (!title) {
         const old = deletedTitleOf(r);
         if (old) { ek = `deleted:${old}`; title = `${old} (deleted event)`; }
       }
-      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: title || 'Unknown event (deleted)', date: titles[r.event_id]?.date || null, deleted: !titles[r.event_id], ...blank() };
+      if (archived) { ek = `archived:${ek}`; title = `${title || 'Unknown event'} (archived)`; }
+      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: title || 'Unknown event (deleted)', date: titles[r.event_id]?.date || null, deleted: !titles[r.event_id], archived, payment_ids: [], ...blank() };
       add(byEvent[ek], r);
+      byEvent[ek].payment_ids.push(r.id);
+      if (archived) continue; // archived orders stay out of the monthly figures
       const mk = String(r.verified_at || r.submitted_at || '').slice(0, 7) || 'unknown';
       byMonth[mk] = byMonth[mk] || { month: mk, ...blank() };
       add(byMonth[mk], r);
@@ -1746,7 +1765,8 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
 
     return successResponse(res, {
       totals,
-      by_event: Object.values(byEvent).sort((a, b) => b.collected - a.collected),
+      by_event: Object.values(byEvent).sort((a, b) => (a.archived - b.archived) || (b.collected - a.collected)),
+      archive_available: hasArchive,
       by_month: Object.values(byMonth).sort((a, b) => (a.month < b.month ? 1 : -1)),
       gateway_fee_note: 'Bachs fees are shown when Bachs reports them on the payment. With "buyer pays processing fee" on, they were paid by buyers on top of the amounts above.'
     }, 'Revenue report');
@@ -2145,14 +2165,17 @@ router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
 router.get('/stats', authenticate, requireAdmin, async (req, res) => {
   try {
     // Execute aggregation queries in parallel
+    // Archived (test) payments are left out of the stats.
+    const hasArchive = await archiveColumnExists();
+    const live = (q) => (hasArchive ? q.is('archived_at', null) : q);
     const [
       { data: totalData, count: totalCount, error: totalError },
       { data: verifiedData, error: verifiedError },
       { count: pendingCount, error: pendingError }
     ] = await Promise.all([
-      supabase.from('payments').select('amount', { count: 'exact' }),
-      supabase.from('payments').select('amount').eq('status', 'verified'),
-      supabase.from('payments').select('*', { count: 'exact', head: true }).eq('status', 'pending')
+      live(supabase.from('payments').select('amount', { count: 'exact' })),
+      live(supabase.from('payments').select('amount').eq('status', 'verified')),
+      live(supabase.from('payments').select('*', { count: 'exact', head: true }).eq('status', 'pending'))
     ]);
 
     if (totalError) throw totalError;
@@ -2179,6 +2202,52 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 // PAYMENT WEBHOOK LISTENER (Bachs & Paystack)
 // ============================================
+// ============================================
+// ARCHIVE / RESTORE PAYMENTS (admin)
+// ============================================
+// Soft delete: archived orders are kept but left out of revenue, stats and
+// the default Payments list. Body: { ids: [payment id, ...], reason? }.
+const PAYMENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function parseArchiveIds(body) {
+  const ids = Array.isArray(body?.ids) ? [...new Set(body.ids.map(String))] : [];
+  if (!ids.length) return { error: 'Choose at least one payment.' };
+  if (ids.length > 500) return { error: 'At most 500 payments at a time.' };
+  if (ids.some(id => !PAYMENT_ID_RE.test(id))) return { error: 'One of the payment ids is not valid.' };
+  return { ids };
+}
+const archiveHandler = (restore) => async (req, res) => {
+  try {
+    if (!(await archiveColumnExists())) {
+      return errorResponse(res, 'Archiving needs database migration 029 first.', 409);
+    }
+    const parsed = parseArchiveIds(req.body);
+    if (parsed.error) return errorResponse(res, parsed.error, 400);
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+      ? req.body.reason.trim().replace(/\s+/g, ' ').slice(0, 200)
+      : 'Archived by admin';
+    let q = supabase.from('payments').update(restore
+      ? { archived_at: null, archived_by: null, archive_reason: null }
+      : { archived_at: new Date().toISOString(), archived_by: req.userId || null, archive_reason: reason })
+      .in('id', parsed.ids);
+    q = restore ? q.not('archived_at', 'is', null) : q.is('archived_at', null);
+    const { data, error } = await q.select('id');
+    if (error) throw error;
+    const changed = (data || []).length;
+    await auditLog({
+      action: restore ? 'payments_restored' : 'payments_archived',
+      userId: req.userId,
+      details: { count: changed, ids: parsed.ids.slice(0, 100), ...(restore ? {} : { reason }) },
+      ip: req.ip
+    });
+    return successResponse(res, { changed }, `${changed} payment(s) ${restore ? 'restored' : 'archived'}`);
+  } catch (error) {
+    console.error('[payments] archive error:', error);
+    return errorResponse(res, restore ? 'Could not restore payments' : 'Could not archive payments', 500, error);
+  }
+};
+router.post('/archive', authenticate, requireAdmin, archiveHandler(false));
+router.post('/unarchive', authenticate, requireAdmin, archiveHandler(true));
+
 // ============================================
 // FETCH MISSING BACHS FEES (admin)
 // ============================================

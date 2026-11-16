@@ -52,6 +52,9 @@
 | 024 | `024_event_games.sql` | `event_items` (games per event, price per play, optional guest price and play limit); `event_item_id` on `payments` and `event_registrations` | ✅ Applied 15 Nov 2026 |
 | 025 | `025_multi_game_orders.sql` | `order_items` (JSONB list of games and plays) on `payments` and `event_registrations`, for orders with several games | ✅ Applied 15 Nov 2026 |
 | 026 | `026_game_marshals.sql` | `game_marshals` (appointed per event, start/end time), `game_plays` (plays marked used), `redeem_game_play()` (locks the ticket so plays can't go below zero) | ✅ Applied 15 Nov 2026 |
+| 027 | `027_homepage_cms.sql` | `executives` (current executive team cards) and `site_settings` (single-row homepage copy, dues/bank info, inquiry contacts) for the Homepage CMS | ✅ Applied 16 Nov 2026 (tables present) |
+| 028 | `028_realtime_site_updates.sql` | Switch on Supabase Realtime for `events`, `past_questions`, `timetables` (site "new content" pop-ups); existing RLS still applies | ✅ Applied 16 Nov 2026 |
+| 029 | `029_payment_archive.sql` | `archived_at`, `archived_by`, `archive_reason` on `payments` (soft delete, e.g. test payments; left out of revenue and stats) | ✅ Applied 16 Nov 2026 |
 
 ---
 

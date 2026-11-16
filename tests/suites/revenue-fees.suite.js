@@ -143,6 +143,36 @@ const check = (name, cond, extra) => { console.log((cond ? 'PASS ' : 'FAIL ') + 
   check('fee not reported yet is left empty and counted', p('p2').gateway_fee === null && r.body.data.no_fee_yet === 1, r.body);
   check('orders that already have a fee, and manual payments, are not touched', p('p3').gateway_fee === 1.5 && p('p4').gateway_fee === null && r.body.data.checked === 2, r.body);
 
+  // ---- archive (soft delete) test payments ----
+  reset();
+  db.events.push({ id: 'evt-movie', title: 'Movie Night', payment_amount: 1000 });
+  const mk = (o) => { const row = { id: require('crypto').randomUUID(), status: 'verified', payment_type: 'event_registration', ticket_quantity: 1, verified_at: '2026-11-12T10:00:00Z', notes: 'Verified via Bachs', archived_at: null, ...o }; db.payments.push(row); return row; };
+  const real = mk({ event_id: 'evt-movie', amount: 1050, subtotal_amount: 1000, service_fee: 50, description: 'Online payment for event: Movie Night (1 ticket)' });
+  const t1 = mk({ event_id: null, amount: 20000, subtotal_amount: 20000, service_fee: 0, description: 'Online payment for event: test (1 ticket)' });
+  const t2 = mk({ event_id: null, amount: 1350, subtotal_amount: 1200, service_fee: 150, description: 'Online payment for event: final test (12 tickets)', ticket_quantity: 12 });
+  const pend = mk({ event_id: null, status: 'pending', amount: 100, description: 'Online payment for event: test (1 ticket)' });
+  r = await call('/revenue', 'admin1', null, 'GET');
+  const testRow = r.body.data.by_event.find(x => x.title === 'test (deleted event)');
+  check('revenue rows carry the payment ids to archive', testRow && testRow.payment_ids.length === 1 && testRow.payment_ids[0] === t1.id, r.body.data.by_event);
+  r = await call('/archive', 'admin1', { ids: [t1.id, t2.id, pend.id], reason: 'Test payment' });
+  check('archiving test payments marks them with time, admin and reason', r.status === 200 && r.body.data.changed === 3 && t1.archived_at && t1.archived_by === 'admin1' && t1.archive_reason === 'Test payment', { b: r.body, t1 });
+  check('nothing is deleted', db.payments.length === 4 && real.archived_at === null, db.payments.length);
+  r = await call('/revenue', 'admin1', null, 'GET');
+  check('archived orders leave the revenue report and totals', r.body.data.by_event.length === 1 && r.body.data.by_event[0].title === 'Movie Night' && r.body.data.totals.ticket_revenue === 1000 && r.body.data.totals.orders === 1, r.body.data);
+  r = await call('/revenue?include_archived=1', 'admin1', null, 'GET');
+  const arch = r.body.data.by_event.filter(x => x.archived);
+  check('"Show archived" lists them, marked archived, without changing totals', arch.length === 2 && arch.every(x => /\(archived\)$/.test(x.title)) && r.body.data.totals.ticket_revenue === 1000, r.body.data);
+  r = await call('/stats', 'admin1', null, 'GET');
+  check('payment stats ignore archived orders (incl. archived pending)', r.status === 200 && r.body.data.verified_amount === 1050 && r.body.data.pending_count === 0, r.body.data);
+  r = await call('/unarchive', 'admin1', { ids: [t2.id] });
+  check('restoring brings an order back into the totals', r.status === 200 && r.body.data.changed === 1 && t2.archived_at === null, r.body);
+  r = await call('/revenue', 'admin1', null, 'GET');
+  check('…and it counts again', r.body.data.totals.ticket_revenue === 2200, r.body.data.totals);
+  r = await call('/archive', 'admin1', { ids: ['not-a-uuid'] });
+  check('invalid ids are refused', r.status === 400, r.body);
+  r = await call('/archive', 'admin1', { ids: [] });
+  check('an empty list is refused', r.status === 400, r.body);
+
   server.close();
   console.log(fails ? fails + ' FAILED' : 'ALL PASSED');
   process.exitCode = fails ? 1 : 0; setTimeout(() => process.exit(process.exitCode), 200);
