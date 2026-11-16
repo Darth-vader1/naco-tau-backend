@@ -1,5 +1,7 @@
 -- ============================================================================
--- Migration 027: Live "new content" pop-ups
+-- Migration 028: Live "new content" pop-ups
+-- (Written as 027; renumbered because 027_homepage_cms.sql already used 027.
+--  If it was recorded as version 027 in schema_migrations, that row is this file.)
 -- Date: 2026-11-16
 --
 -- The site shows a pop-up ("New event published!", "New resource uploaded",
@@ -42,7 +44,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 INSERT INTO schema_migrations (version, name, applied_at)
-VALUES ('027', '027_realtime_site_updates.sql', NOW())
+VALUES ('028', '028_realtime_site_updates.sql', NOW())
 ON CONFLICT (version) DO NOTHING;
 
 -- Verification (should list the three tables):
