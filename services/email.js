@@ -1021,7 +1021,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
         ` : `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
-                    🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
+                    🎟️ <strong>Admission Notice:</strong> tap <strong>Open My QR Ticket</strong> below and show the QR code (or your ticket number <strong>${ticketNumber}</strong>) at the entrance. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
                 </p>
             </div>
         `;
@@ -1033,8 +1033,8 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
             contentTitle: `Hi ${studentName}, you're all set!`,
             metaRows,
             extraHtml: ticketNotice,
-            buttonText: gameLines && refStr !== 'N/A' ? 'Open My QR Ticket' : 'View Events Portal',
-            buttonUrl: gameLines && refStr !== 'N/A' ? `${FRONTEND_URL}/receipt.html?reference=${encodeURIComponent(refStr)}` : ticketUrl,
+            buttonText: refStr !== 'N/A' ? 'Open My QR Ticket' : 'View Events Portal',
+            buttonUrl: refStr !== 'N/A' ? `${FRONTEND_URL}/receipt.html?reference=${encodeURIComponent(refStr)}` : ticketUrl,
             noticeText: 'Please keep this email for your records.'
         });
 
@@ -1076,7 +1076,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
 /**
  * Invitation for a student appointed as a game marshal for one event.
  */
-async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) {
+async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt, mode = 'games' }) {
     if (!student || !student.email || !event) return { success: false, error: 'missing details' };
     try {
         const name = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'there';
@@ -1086,11 +1086,14 @@ async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) 
         const title = escEmail(event.title || 'Game Night');
         const dashboardUrl = `${FRONTEND_URL}/student-dashboard.html`;
 
+        const checkin = mode === 'checkin';
         const html = renderBaseLayout({
-            headerBadge: 'Game Marshal Invitation',
-            headerTitle: '🎮 You are a Game Marshal',
+            headerBadge: checkin ? 'Check-in Duty' : 'Game Marshal Invitation',
+            headerTitle: checkin ? '🎟️ You are on check-in duty' : '🎮 You are a Game Marshal',
             headerSubtitle: `For ${title}`,
-            contentTitle: `Hi ${escEmail(name)}, you've been appointed as a game marshal.`,
+            contentTitle: checkin
+                ? `Hi ${escEmail(name)}, you've been appointed to check people in at the door.`
+                : `Hi ${escEmail(name)}, you've been appointed as a game marshal.`,
             metaRows: [
                 { label: 'Event', value: `<strong>${title}</strong>` },
                 ...(event.location ? [{ label: 'Venue', value: escEmail(event.location) }] : []),
@@ -1100,9 +1103,9 @@ async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) 
             extraHtml: `
                 <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; font-size: 13px; color: #166534;">
                     <strong>What to do:</strong> sign in to the NACOS portal with your school email as usual.
-                    During the times above, a <strong>Game Marshal</strong> section appears on your dashboard.
-                    Open it, then scan each player's ticket QR code (or type their ticket number) and tap
-                    <strong>Mark 1 play</strong> when they play a game. The section closes automatically when your time ends.
+                    During the times above, an <strong>Event duty</strong> section appears on your dashboard.
+                    Open it, then scan each ${checkin ? "guest's" : "player's"} ticket QR code (or type their ticket number) and tap
+                    <strong>${checkin ? 'Admit' : 'Mark 1 play'}</strong>${checkin ? ' as they come in. A ticket for several people can be admitted all at once or one at a time' : ' when they play a game'}. The section closes automatically when your time ends.
                 </div>
             `,
             buttonText: 'Open My Dashboard',
@@ -1112,9 +1115,11 @@ async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) 
 
         return await sendEmail({
             to: student.email,
-            subject: `🎮 Game Marshal for ${event.title || 'Game Night'} — NACOS TAU`,
+            subject: checkin ? `🎟️ Check-in duty for ${event.title || 'the event'} — NACOS TAU` : `🎮 Game Marshal for ${event.title || 'Game Night'} — NACOS TAU`,
             html,
-            text: `Hi ${name},\n\nYou have been appointed as a game marshal for "${event.title || 'Game Night'}".\nFrom: ${fromStr}\nUntil: ${toStr}\n\nSign in to the NACOS portal with your school email. During these times a Game Marshal section appears on your dashboard: scan each player's ticket QR code (or type the ticket number) and mark plays as they play.\n\n${dashboardUrl}\n\nNACOS TAU Chapter`
+            text: checkin
+                ? `Hi ${name},\n\nYou have been appointed to check people in at "${event.title || 'the event'}".\nFrom: ${fromStr}\nUntil: ${toStr}\n\nSign in to the NACOS portal with your school email. During these times an Event duty section appears on your dashboard: scan each guest's ticket QR code (or type the ticket number) and tap Admit as they come in.\n\n${dashboardUrl}\n\nNACOS TAU Chapter`
+                : `Hi ${name},\n\nYou have been appointed as a game marshal for "${event.title || 'Game Night'}".\nFrom: ${fromStr}\nUntil: ${toStr}\n\nSign in to the NACOS portal with your school email. During these times an Event duty section appears on your dashboard: scan each player's ticket QR code (or type the ticket number) and mark plays as they play.\n\n${dashboardUrl}\n\nNACOS TAU Chapter`
         });
     } catch (err) {
         console.error('Failed to send game marshal invitation:', err);

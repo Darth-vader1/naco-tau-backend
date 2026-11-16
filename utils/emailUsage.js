@@ -54,7 +54,7 @@ function kindOf(subject) {
   if (/ticket confirmed|game ticket/.test(s)) return 'ticket';
   if (/payment received/.test(s)) return 'payment_alert';
   if (/new hackathon team|hackathon team/.test(s)) return 'hackathon_alert';
-  if (/game marshal/.test(s)) return 'marshal_invite';
+  if (/game marshal|check-in duty/.test(s)) return 'marshal_invite';
   if (/complete your nacos|profile/.test(s)) return 'profile_reminder';
   if (/welcome|verify|verification|reset/.test(s)) return 'account';
   if (/new student|registration/.test(s)) return 'admin_alert';
