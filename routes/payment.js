@@ -104,6 +104,11 @@ async function loadPayableEvent(eventId, { guest = false, lines = null, settling
   // Game events: the buyer picks one or more games, each with a number of
   // plays; every game is priced PER PLAY. The order quantity is total plays.
   const items = await loadEventItems(event.id);
+  // Game lines sent for an event that has no games: refuse, so the order
+  // can't fall through to ticket pricing with no quantity (a ₦0 checkout).
+  if (!items.length && lines && lines.length && !settling) {
+    return { error: 'This event has no games to choose from.', status: 400 };
+  }
   if (items.length || (settling && lines && lines.length)) {
     if (!lines || !lines.length) return { error: 'Please choose at least one game.', status: 400 };
     const game = await priceGameLines(event, lines, { guest, settling, activeItems: items });
@@ -353,6 +358,10 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       ? gameBreakdown(game, feePerTicket)
       : orderBreakdown({ unitPrice, quantity, feePerTicket });
     const price = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
+    // Never open a checkout for nothing (or less), whatever the request said.
+    if (!(Number.isFinite(price) && price > 0) || !(breakdown.quantity > 0)) {
+      return errorResponse(res, 'This order could not be priced. Please choose your tickets again.', 400);
+    }
 
     // One order per student per event unless the admin has switched on
     // "Allow repeat purchases" for this event. Games are always pay-per-play.
@@ -727,7 +736,13 @@ router.get('/receipt/:reference', async (req, res) => {
       verified_at: payment.verified_at,
       submitted_at: payment.submitted_at,
       event,
-      registration
+      // Ticket status only: no buyer name, email, phone or account id, since
+      // anyone holding the receipt link can open this.
+      registration: registration ? {
+        status: registration.status,
+        ticket_quantity: registration.ticket_quantity,
+        registration_date: registration.registration_date
+      } : null
     };
 
     // Owners additionally receive their own student details
@@ -1387,6 +1402,10 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
     const feePerTicket = serviceFeePerTicket(payable.event, feeSettings, { guest: true });
     const breakdown = game ? gameBreakdown(game, feePerTicket) : orderBreakdown({ unitPrice, quantity, feePerTicket });
     const total = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
+    // Never open a checkout for nothing (or less), whatever the request said.
+    if (!(Number.isFinite(total) && total > 0) || !(breakdown.quantity > 0)) {
+      return errorResponse(res, 'This order could not be priced. Please choose your tickets again.', 400);
+    }
     const ticketLabel = orderLabel(game, quantity);
 
     let checkoutId = null;

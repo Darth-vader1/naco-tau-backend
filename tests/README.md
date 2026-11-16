@@ -19,6 +19,7 @@ real is touched**: no Supabase, Redis, Bachs or email. A suite prints one
 
 | Suite | What it protects |
 |---|---|
+| `payment-attacks` | 63 simulated attacks: price tampering, fake/reused/underpaid confirmations, forged and replayed webhooks, guest checkout abuse, receipt data exposure, admin routes without admin rights |
 | `payments` | Prices come from the server, replayed or underpaid references are refused, webhooks settle once, guest checkout, ticket fees, receipts |
 | `games-multi` | Several games in one order, plays and fees, play limits, guest prices, webhook and receipt (including plays used) |
 | `games-missing-table` | Paid checkouts keep working if the games table isn't there yet |
