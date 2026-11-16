@@ -41,6 +41,95 @@ const auditLog = async ({
     }
 };
 
+// ============================================
+// WHAT GOES INTO THE AUDIT TRAIL
+// ============================================
+// The audit trail records actions people take (and their outcome), not
+// server traffic. Monitoring pings, CORS preflights, token refreshes and
+// dashboard housekeeping are excluded; they belong in the request logs.
+
+// Request patterns that are never audit events (matched on method + full path).
+const AUDIT_NOISE = [
+    { methods: ['HEAD', 'OPTIONS'] },                              // monitors, CORS preflight
+    { path: /^\/api\/health/ },
+    { path: /^\/api\/storage\/ensure-(buckets|one)/ },             // admin dashboard housekeeping
+    { path: /^\/api\/storage\/status/ },
+    { path: /^\/api\/auth\/(session-status|refresh|verify)/ },     // session plumbing
+    { path: /^\/api\/analytics\/track/ },                          // page-view analytics has its own table
+    { path: /^\/(assets|frontend|vendor)\// }
+];
+
+// Actions already written explicitly by route handlers (avoid duplicate rows).
+const EXPLICITLY_AUDITED = [
+    { method: 'POST', path: /^\/api\/auth\/(register|login|admin\/login|logout|forgot-password)$/ },
+    { method: 'POST', path: /^\/api\/payments\/(submit|verify-paystack|guest-verify|[^/]+\/recheck|[^/]+\/gateway-recheck|webhook)$/ },
+    { method: 'PUT', path: /^\/api\/payments\/[^/]+\/verify$/ }
+];
+
+/** "admin" | "student" | "guest" (no login) */
+function actorTypeOf(req) {
+    if (req.user || req.userId) {
+        return (req.userRole === 'admin' || req.userRole === 'super_admin') ? 'admin' : 'student';
+    }
+    return 'guest';
+}
+
+/** A short human-readable name for the record a request acted on. */
+function titleOf(body) {
+    if (!body || typeof body !== 'object') return '';
+    const t = body.title || body.name || body.course_code || body.event_title || '';
+    return typeof t === 'string' ? t.slice(0, 80) : '';
+}
+
+/**
+ * Decide whether a finished request is an audit event and, if so, describe it.
+ * Returns { action, target } or null to skip.
+ */
+function describeRequestForAudit(req, statusCode) {
+    const method = req.method;
+    const fullPath = (req.originalUrl || '').split('?')[0];
+
+    for (const rule of AUDIT_NOISE) {
+        if (rule.methods && rule.methods.includes(method)) return null;
+        if (rule.path && rule.path.test(fullPath)) return null;
+    }
+    for (const rule of EXPLICITLY_AUDITED) {
+        if (rule.method === method && rule.path.test(fullPath)) return null;
+    }
+
+    // Unmatched routes (404 from scanners/bots) are noise; honeypots log real probes.
+    if (!req.route) return null;
+
+    // Plain reads are only audited for admin data access (PII, exports).
+    const isAdminArea = /\/admin(\/|$)|\/export\b|\/audit-logs|\/students(\/|$)/.test(fullPath);
+    if (method === 'GET' && statusCode < 400 && !isAdminArea) return null;
+
+    // Admin generic table writes: /api/admin/:table[/:id]
+    const adminTable = fullPath.match(/^\/api\/admin\/([a-z_]+)(?:\/([^/]+))?(?:\/(batch-update))?$/);
+    if (adminTable) {
+        const [, table, id, batch] = adminTable;
+        const verb = batch ? 'batch_update' : ({ POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete' }[method] || method.toLowerCase());
+        const title = titleOf(req.body);
+        const target = [table.replace(/_/g, ' '), title ? `"${title}"` : '', id && !batch ? `#${String(id).slice(0, 8)}` : '']
+            .filter(Boolean).join(' ');
+        return { action: `admin_${verb}_${table}`, target };
+    }
+
+    // Everything else: name it after the route pattern, e.g. "post_api_events_id_register"
+    const routePattern = `${req.baseUrl || ''}${req.route.path || ''}`;
+    const action = `${method}_${routePattern}`
+        .toLowerCase()
+        .replace(/[:*?]/g, '')
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 80);
+
+    const idParam = req.params && (req.params.id || req.params.idOrSlug || req.params.subId);
+    const title = titleOf(req.body);
+    const target = [title ? `"${title}"` : '', idParam ? `#${String(idParam).slice(0, 8)}` : ''].filter(Boolean).join(' ');
+    return { action, target };
+}
+
 /**
  * Middleware to log API requests
  * - Hooks res.send() to log AFTER response status is determined
@@ -58,80 +147,36 @@ const auditMiddleware = (req, res, next) => {
     res.send = function(data) {
         const statusCode = res.statusCode;
 
-        // Only log if status is 2xx-4xx (skip 5xx noise logged separately,
-        // and skip very early responses like static files)
+        // Only log if status is 2xx-4xx (5xx errors are logged separately)
         if (statusCode >= 200 && statusCode < 500) {
-            const userId = req.user?.id || req.userId || null;
-            const userEmail = req.user?.email || null;
+            const described = describeRequestForAudit(req, statusCode);
 
-            // Determine route (if matched) or fallback path
-            const route = req.route?.path || req.path;
-            const method = req.method;
+            if (described) {
+                const userId = req.user?.id || req.userId || null;
+                const userEmail = req.user?.email || null;
+                const method = req.method;
 
-            // Skip paths that are very noisy or handled by explicit auditLog()
-            const skipPrefixes = ['/api/health', '/assets', '/frontend', '/vendor'];
-            const skipActions = new Set([
-                'student_registration', 'admin_login', 'logout',
-                'student_approve', 'student_reject', 'student_deleted',
-                'profile_picture_update', 'resource_created', 'resource_updated', 'resource_deleted',
-                'timetable_created', 'timetable_updated', 'timetable_deleted',
-                'career_path_created', 'career_path_updated', 'career_path_deleted',
-                'payment_submitted', 'payment_verified', 'payment_rejected'
-            ]);
-
-            const shouldSkip =
-                skipPrefixes.some(p => req.originalUrl.startsWith(p)) ||
-                // Skip successful verify calls (very chatty on every SPA route)
-                (method === 'GET' && /\/auth\/verify$/.test(route)) ||
-                // Skip pure-GET reads for non-admin endpoints to keep logs focused
-                (method === 'GET' && statusCode < 400 && !route.includes('/admin'));
-
-            if (!shouldSkip) {
-                // Generate cleaner action name
-                let autoAction = `auto_${method}_${route.replace(/\//g, '_').replace(/[:?]/g, '') || 'root'}`;
-                
-                // Clean up common patterns to make action names more readable
-                autoAction = autoAction
-                    .replace('auto_POST__api_auth_register', 'student_registration')
-                    .replace('auto_POST__api_storage_ensure-buckets', 'storage_bucket_check')
-                    .replace('auto_PUT__api_students_me', 'profile_update')
-                    .replace('auto_GET__api_students_directory', 'view_student_directory')
-                    .replace('auto_GET__api_events_upcoming', 'view_upcoming_events')
-                    .replace('auto_GET__api_events_past', 'view_past_events')
-                    .replace('auto_GET__api_resources', 'view_resources')
-                    .replace('auto_GET__api_timetables', 'view_timetables')
-                    .replace('auto_GET__api_career', 'view_career_paths')
-                    .replace('auto_POST__api_events_id_register', 'event_registration')
-                    .replace('auto_GET__api_payments', 'view_payments')
-                    .replace('auto_POST__api_payments', 'payment_submission')
-                    .replace(/_api_/g, '_')
-                    .replace(/__/g, '_')
-                    .slice(0, 80);
-                
-                const alreadyAudited =
-                    (typeof autoAction === 'string') &&
-                    [...skipActions].some(a => autoAction.includes(a));
-
-                if (!alreadyAudited) {
-                    auditLog({
-                        action: autoAction,
-                        userId: userId,
-                        userEmail: userEmail,
-                        details: {
-                            method,
-                            path: req.originalUrl,
-                            query: Object.keys(req.query || {}).length ? req.query : undefined,
-                            body: (method === 'GET' || req.method === 'DELETE') ? undefined :
-                                Object.keys(req.body || {}).length
-                                    ? redactSecrets(req.body)
-                                    : undefined,
-                            statusCode: statusCode,
-                            responseTime: Date.now() - req._startTime
-                        },
-                        ip: req.ip,
-                        userAgent: req.headers['user-agent']
-                    }).catch(err => console.error('[auditMiddleware] audit log error:', err.message));
-                }
+                auditLog({
+                    action: described.action,
+                    userId,
+                    userEmail,
+                    details: {
+                        target: described.target || undefined,
+                        outcome: statusCode < 400 ? 'success' : 'failure',
+                        actor_type: actorTypeOf(req),
+                        method,
+                        path: req.originalUrl,
+                        query: Object.keys(req.query || {}).length ? req.query : undefined,
+                        body: (method === 'GET' || method === 'DELETE') ? undefined :
+                            Object.keys(req.body || {}).length
+                                ? redactSecrets(req.body)
+                                : undefined,
+                        statusCode,
+                        responseTime: Date.now() - req._startTime
+                    },
+                    ip: req.ip,
+                    userAgent: req.headers['user-agent']
+                }).catch(err => console.error('[auditMiddleware] audit log error:', err.message));
             }
         }
 
@@ -270,6 +315,7 @@ const getAuditLogs = async (options = {}) => {
 module.exports = {
     auditLog,
     auditMiddleware,
+    describeRequestForAudit,
     logLogin,
     logLogout,
     logAdminAction,

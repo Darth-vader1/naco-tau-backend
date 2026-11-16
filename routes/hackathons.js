@@ -5,7 +5,9 @@ const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin, optionalAuth } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, slugify } = require('../utils/helpers');
-const { triggerAutoContentBroadcast } = require('../services/email');
+const { triggerAutoContentBroadcast, sendHackathonTeamAdminNotificationEmail } = require('../services/email');
+const rateLimit = require('express-rate-limit');
+const { registerLimiter } = require('../middleware/rateLimitInstances');
 
 // ============================================
 // 1. PUBLIC: GET ALL ACTIVE / UPCOMING HACKATHONS
@@ -250,6 +252,106 @@ router.get('/:idOrSlug', optionalAuth, async (req, res) => {
 // ============================================
 // 4. STUDENT: REGISTER TEAM / INDIVIDUAL
 // ============================================
+// ============================================
+// TEAM ROSTER HELPERS
+// ============================================
+const TEAM_META_ROWS = ['[ROLE_REQ]', '[LEADER_META]'];
+const normEmail = (e) => String(e || '').trim().toLowerCase();
+
+/**
+ * Who is already on a team in this hackathon, by account id and by email.
+ * The team led by `skipLeaderId` (the caller's own team) is left out, so a
+ * leader editing their team doesn't clash with their own teammates.
+ */
+async function loadTakenRoster(hackathonId, skipLeaderId) {
+    const { data: regs, error } = await supabase
+        .from('hackathon_registrations')
+        .select('id, team_name, leader_id, team_members')
+        .eq('hackathon_id', hackathonId);
+    if (error) throw error;
+
+    const byUser = new Map();  // user_id -> team name
+    const byEmail = new Map(); // email   -> team name
+    for (const r of regs || []) {
+        if (skipLeaderId && r.leader_id === skipLeaderId) continue;
+        if (r.leader_id) byUser.set(r.leader_id, r.team_name);
+        for (const m of Array.isArray(r.team_members) ? r.team_members : []) {
+            if (!m || typeof m !== 'object') continue;
+            if (m.name === '[LEADER_META]') { if (m.email) byEmail.set(normEmail(m.email), r.team_name); continue; }
+            if (TEAM_META_ROWS.includes(m.name)) continue;
+            if (m.user_id) byUser.set(m.user_id, r.team_name);
+            if (m.email) byEmail.set(normEmail(m.email), r.team_name);
+        }
+    }
+    return { byUser, byEmail };
+}
+
+// Search as you type: one search per keystroke pause, so allow a brisk pace
+// per student while stopping scraping of the student list.
+const teammateSearchLimiter = registerLimiter('tmsearch', (store) => rateLimit({
+    windowMs: 60 * 1000,
+    max: 40,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => req.userId || req.ip,
+    message: { success: false, error: 'Too many searches. Please slow down.' },
+    validate: { trustProxy: false },
+    store
+}));
+
+// ============================================
+// STUDENT: FIND TEAMMATES (search as you type)
+// ============================================
+// Returns at most 8 students whose name matches at least 3 typed letters.
+// Only name, department and level are shown (no email or phone). Leaves
+// out: the caller, private profiles, inactive accounts, and anyone already
+// on another team in this hackathon.
+router.get('/:id/teammate-search', authenticate, teammateSearchLimiter, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const q = String(req.query.q || '').replace(/[,()*%\\":.]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 50);
+        if (q.length < 3) return successResponse(res, { results: [] }, 'Type at least 3 letters');
+
+        // Both lookups at once (they don't depend on each other).
+        const FETCH = 60;
+        const [taken, studentsRes] = await Promise.all([
+            loadTakenRoster(id, req.userId),
+            supabase
+                .from('students_with_current_level')
+                .select('user_id, name, first_name, last_name, email, department, current_level, profile_picture_url')
+                .eq('status', 'active')
+                .in('visibility', ['students-only', 'public'])
+                .neq('user_id', req.userId)
+                .or(`name.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
+                .order('name', { ascending: true })
+                .limit(FETCH)
+        ]);
+        const { data, error } = studentsRes;
+        if (error) throw error;
+
+        // Up to 30 so the browser can keep narrowing the list as more letters
+        // are typed without asking again. `complete` = every match is included.
+        const MAX = 30;
+        const available = (data || [])
+            .filter(s => s.user_id && !taken.byUser.has(s.user_id) && !taken.byEmail.has(normEmail(s.email)));
+        const complete = (data || []).length < FETCH && available.length <= MAX;
+        const results = available
+            .slice(0, MAX)
+            .map(s => ({
+                user_id: s.user_id,
+                name: s.name || `${s.first_name || ''} ${s.last_name || ''}`.trim(),
+                department: s.department || null,
+                level: s.current_level || null,
+                avatar: s.profile_picture_url || null
+            }));
+
+        return successResponse(res, { results, complete }, 'Matching students');
+    } catch (error) {
+        console.error('Teammate search error:', error);
+        return errorResponse(res, 'Could not search students right now', 500);
+    }
+});
+
 router.post('/:id/register', authenticate, async (req, res) => {
     try {
         const { id } = req.params;
@@ -286,10 +388,74 @@ router.post('/:id/register', authenticate, async (req, res) => {
             return errorResponse(res, 'Registration deadline for this event has passed', 400);
         }
 
-        // Validate team member array bounds
-        const members = Array.isArray(teamMembers) ? teamMembers : [];
-        if (members.length + 1 > (hackathon.max_team_size || 4)) {
-            return errorResponse(res, `Team size cannot exceed ${hackathon.max_team_size} members`, 400);
+        // Validate team size. team_members can also carry internal rows
+        // ([ROLE_REQ], [LEADER_META]); the leader is counted once, never again
+        // as a teammate even if they listed themselves.
+        const leaderEmail = String(req.user?.email || '').trim().toLowerCase();
+        const META_ROWS = ['[ROLE_REQ]', '[LEADER_META]'];
+        let members = (Array.isArray(teamMembers) ? teamMembers : []).filter(m => {
+            if (!m || typeof m !== 'object') return false;
+            if (META_ROWS.includes(m.name)) return true; // keep internal rows as stored
+            const email = String(m.email || '').trim().toLowerCase();
+            if (m.user_id && String(m.user_id) === String(req.userId)) return false; // the leader picked themself
+            return !(leaderEmail && email && email === leaderEmail); // drop the leader listed as a teammate
+        });
+
+        // Teammates picked from the search are linked to their account: their
+        // name and email come from it (no typos), and they must be active students.
+        const linkedIds = [...new Set(members
+            .filter(m => !META_ROWS.includes(m.name) && m.user_id)
+            .map(m => String(m.user_id)))];
+        if (linkedIds.length) {
+            const { data: accounts, error: accErr } = await supabase
+                .from('students')
+                .select('user_id, name, first_name, last_name, email, status')
+                .in('user_id', linkedIds);
+            if (accErr) throw accErr;
+            const byId = new Map((accounts || []).map(a => [String(a.user_id), a]));
+            for (const m of members) {
+                if (META_ROWS.includes(m.name) || !m.user_id) continue;
+                const acct = byId.get(String(m.user_id));
+                if (!acct || (acct.status && acct.status !== 'active')) {
+                    return errorResponse(res, `${m.name || 'A selected teammate'} couldn't be found as an active student. Remove them and pick again, or add them manually.`, 400);
+                }
+                m.user_id = acct.user_id;
+                m.name = acct.name || `${acct.first_name || ''} ${acct.last_name || ''}`.trim() || m.name;
+                m.email = acct.email || m.email || '';
+            }
+            // A linked account might be the leader's own (matched by email above only if typed).
+            members = members.filter(m => META_ROWS.includes(m.name) || normEmail(m.email) !== leaderEmail);
+        }
+
+        // Each person once within the team
+        const seenPeople = new Set();
+        for (const m of members) {
+            if (META_ROWS.includes(m.name)) continue;
+            const key = m.user_id ? `u:${m.user_id}` : (m.email ? `e:${normEmail(m.email)}` : `n:${String(m.name || '').trim().toLowerCase()}`);
+            if (seenPeople.has(key)) {
+                return errorResponse(res, `${m.name || 'A teammate'} is listed more than once. Remove the extra row.`, 400);
+            }
+            seenPeople.add(key);
+        }
+
+        // Nobody can be on two teams in the same hackathon (the leader included)
+        const takenRoster = await loadTakenRoster(id, req.userId);
+        const leaderTeam = takenRoster.byUser.get(req.userId) || takenRoster.byEmail.get(leaderEmail);
+        if (leaderTeam) {
+            return errorResponse(res, `You're already listed on team "${leaderTeam}" in this hackathon, so you can't lead another team.`, 409);
+        }
+        for (const m of members) {
+            if (META_ROWS.includes(m.name)) continue;
+            const team = (m.user_id && takenRoster.byUser.get(m.user_id)) || (m.email && takenRoster.byEmail.get(normEmail(m.email)));
+            if (team) {
+                return errorResponse(res, `${m.name || 'A teammate'} is already on team "${team}" in this hackathon.`, 409);
+            }
+        }
+
+        const teammateCount = members.filter(m => !META_ROWS.includes(m.name)).length;
+        const maxSize = hackathon.max_team_size || 4;
+        if (teammateCount + 1 > maxSize) {
+            return errorResponse(res, `Team size cannot exceed ${maxSize} members (you plus ${maxSize - 1} teammates).`, 400);
         }
 
         const trimmedName = teamName.trim();
@@ -368,6 +534,29 @@ router.post('/:id/register', authenticate, async (req, res) => {
             details: { hackathon_id: id, team_name: trimmedName },
             ip: req.ip
         });
+
+        // Tell the admins about the new team. Awaited (bounded) so a serverless
+        // platform can't freeze the function before it is sent; never blocks or
+        // fails the registration itself.
+        try {
+            const { data: leaderProfile } = await supabase
+                .from('students')
+                .select('name, first_name, last_name, email, matric_no, phone, department, current_level')
+                .eq('user_id', req.userId)
+                .maybeSingle();
+            const teammates = members.filter(m => !META_ROWS.includes(m.name));
+            await Promise.race([
+                sendHackathonTeamAdminNotificationEmail({
+                    hackathon,
+                    registration: reg,
+                    leader: leaderProfile || { email: req.user?.email },
+                    teammates
+                }),
+                new Promise(resolve => setTimeout(resolve, 8000))
+            ]);
+        } catch (notifyErr) {
+            console.warn('[hackathons] new-team admin email failed (non-fatal):', notifyErr?.message || notifyErr);
+        }
 
         return successResponse(res, { registration: reg }, 'Successfully registered for hackathon!', 201);
     } catch (error) {

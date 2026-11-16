@@ -318,6 +318,7 @@ const optionalAuth = async (req, res, next) => {
 
 module.exports = {
   authenticate,
+  getAuthContext,
   requireAdmin,
   requireSuperAdmin,
   optionalAuth,

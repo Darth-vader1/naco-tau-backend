@@ -1,6 +1,7 @@
 // backend/services/email.js
 const nodemailer = require('nodemailer');
 const { supabase } = require('../config/supabase');
+const { formatPrizePool: formatPrizeText } = require('../utils/prizeFormat');
 
 // ============================================
 // INITIALIZE NODEMAILER (SMTP)
@@ -393,13 +394,10 @@ function formatNaira(amount) {
     return '₦' + num.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// Formats every naira amount inside free-text prize descriptions
+// ("N300,000 (1st: 150k)" -> "₦300,000 (1st: ₦150,000)"). Shared with the frontend.
 function formatPrizePool(prize) {
-    if (!prize) return 'Prizes & Recognition';
-    const str = String(prize).trim();
-    if (/^\d+(\.\d+)?$/.test(str)) {
-        return '₦' + Number(str).toLocaleString('en-NG');
-    }
-    return str;
+    return formatPrizeText(prize, { fallback: 'Prizes & Recognition' });
 }
 
 function renderBaseLayout({
@@ -782,7 +780,7 @@ function triggerAutoContentBroadcast(contentType, itemData, options = {}) {
         case 'hackathons':
             templateType = 'new_hackathon';
             const typeUpper = (itemData.event_type || 'Competition').toUpperCase();
-            const prizeSnippet = itemData.prize_pool ? ` (${itemData.prize_pool})` : '';
+            const prizeSnippet = itemData.prize_pool ? ` (${formatPrizeText(itemData.prize_pool)})` : '';
             subject = `🏆 New ${typeUpper}: ${itemData.title || 'Challenge Announced'}${prizeSnippet}`;
             break;
         default:
@@ -955,7 +953,19 @@ async function sendNewStudentAdminNotification({ student }) {
 // ============================================
 // SEND EVENT TICKET CONFIRMATION EMAIL
 // ============================================
-async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
+const escEmail = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** "FIFA × 2 (₦500 each)" lines for game orders, as HTML and as text. */
+function gameLinesFor(games) {
+    if (!Array.isArray(games) || !games.length) return null;
+    const item = (g) => `${g.name} × ${g.plays}${g.unit_price != null ? ` (${formatNaira(g.unit_price)} each)` : ''}`;
+    return {
+        html: games.map(g => escEmail(item(g))).join('<br>'),
+        text: games.map(item).join(', ')
+    };
+}
+
+async function sendEventTicketEmail({ student, event, ticketNumber, payment, games = null }) {
     if (!student || !student.email || !event) return;
     try {
         const studentName = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'Student';
@@ -967,23 +977,43 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
         const refStr = payment?.transaction_id || payment?.reference || 'N/A';
         const ticketUrl = `${FRONTEND_URL}/events.html`;
         const qty = Math.max(1, parseInt(payment?.ticket_quantity, 10) || 1);
-        const admitStr = `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
-        const unitStr = qty > 1 && payment?.amount ? ` (${qty} × ${formatNaira(Number(payment.amount) / qty)})` : '';
+        const gameLines = gameLinesFor(games);
+        const playsStr = `${qty} play${qty > 1 ? 's' : ''}`;
+        const admitStr = gameLines ? playsStr : `Admits ${qty} ${qty > 1 ? 'people' : 'person'}`;
+        const subtotalNum = Number(payment?.subtotal_amount ?? payment?.amount ?? 0);
+        const serviceFeeNum = Number(payment?.service_fee || 0);
+        const gatewayFeeNum = payment?.gateway_fee != null ? Number(payment.gateway_fee) : 0;
+        const unitStr = qty > 1 && subtotalNum ? ` (${qty} × ${formatNaira(subtotalNum / qty)})` : '';
+        const feeRows = [
+            ...(serviceFeeNum > 0 ? [{ label: gameLines ? 'Plays' : 'Tickets', value: `${formatNaira(subtotalNum)}${gameLines ? '' : unitStr}` }, { label: 'Service Fee', value: formatNaira(serviceFeeNum) }] : []),
+            ...(gatewayFeeNum > 0 ? [{ label: 'Bachs Processing Fee', value: `${formatNaira(gatewayFeeNum)} (paid at checkout)` }] : [])
+        ];
+        const feeText = (serviceFeeNum > 0 ? `\n${gameLines ? 'Plays' : 'Tickets'}: ${formatNaira(subtotalNum)}\nService Fee: ${formatNaira(serviceFeeNum)}` : '') +
+            (gatewayFeeNum > 0 ? `\nBachs Processing Fee: ${formatNaira(gatewayFeeNum)}` : '');
 
         const metaRows = [
             { label: 'Ticket Number', value: `<strong style="font-size: 16px; color: #157a09; letter-spacing: 1px;">${ticketNumber}</strong>` },
             { label: 'Event', value: `<strong>${eventTitle}</strong>` },
             { label: 'Ticket Holder', value: studentName },
-            { label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` },
+            ...(gameLines
+                ? [{ label: 'Games', value: gameLines.html }, { label: 'Total Plays', value: `<strong>${qty}</strong>` }]
+                : [{ label: 'Tickets', value: `<strong>${qty}</strong> &mdash; ${admitStr}` }]),
             ...(student.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
             { label: 'Date', value: dateStr },
             { label: 'Time', value: timeStr },
             { label: 'Location / Venue', value: locationStr },
-            { label: 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${unitStr}` },
+            ...feeRows,
+            { label: serviceFeeNum > 0 ? 'Total Paid' : 'Fee Paid', value: `<span class="badge" style="background:#e8f5e9; color:#157a09; font-weight:700;">${amountStr}</span>${serviceFeeNum > 0 || gameLines ? '' : unitStr}` },
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
-        const ticketNotice = `
+        const ticketNotice = gameLines ? `
+            <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
+                <p style="margin: 0; font-size: 13px; color: #166534;">
+                    🎮 <strong>How to play:</strong> tap <strong>Open My QR Ticket</strong> below and show the QR code (or your ticket number <strong>${ticketNumber}</strong>) at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
+                </p>
+            </div>
+        ` : `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
                     🎟️ <strong>Admission Notice:</strong> Present this email or your ticket number <strong>${ticketNumber}</strong> at the event entrance for verification. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
@@ -993,13 +1023,13 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
 
         const html = renderBaseLayout({
             headerBadge: 'Payment Verified & Confirmed',
-            headerTitle: '🎟️ Event Registration Ticket',
-            headerSubtitle: `Your seat is secured for ${eventTitle}`,
+            headerTitle: gameLines ? '🎮 Game Ticket' : '🎟️ Event Registration Ticket',
+            headerSubtitle: gameLines ? `Your ${playsStr} for ${eventTitle} are booked` : `Your seat is secured for ${eventTitle}`,
             contentTitle: `Hi ${studentName}, you're all set!`,
             metaRows,
             extraHtml: ticketNotice,
-            buttonText: 'View Events Portal',
-            buttonUrl: ticketUrl,
+            buttonText: gameLines && refStr !== 'N/A' ? 'Open My QR Ticket' : 'View Events Portal',
+            buttonUrl: gameLines && refStr !== 'N/A' ? `${FRONTEND_URL}/receipt.html?reference=${encodeURIComponent(refStr)}` : ticketUrl,
             noticeText: 'Please keep this email for your records.'
         });
 
@@ -1007,7 +1037,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
-            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\nTickets: ${qty} (${admitStr})\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}\nFee Paid: ${amountStr}${unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
+            text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\n${gameLines ? `Games: ${gameLines.text}\nTotal plays: ${qty}` : `Tickets: ${qty} (${admitStr})`}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}${feeText}\nTotal Paid: ${amountStr}${serviceFeeNum > 0 ? '' : unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
 
         try {
@@ -1034,9 +1064,124 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment }) {
 }
 
 // ============================================
+// SEND NEW HACKATHON TEAM ALERT TO ADMINS
+// ============================================
+// Recipients: HACKATHON_ALERT_EMAILS (comma-separated) if set, otherwise the
+// same people who get payment alerts.
+/**
+ * Invitation for a student appointed as a game marshal for one event.
+ */
+async function sendGameMarshalInviteEmail({ student, event, startsAt, endsAt }) {
+    if (!student || !student.email || !event) return { success: false, error: 'missing details' };
+    try {
+        const name = student.name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || 'there';
+        const fmt = (d) => new Date(d).toLocaleString('en-NG', { timeZone: 'Africa/Lagos', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+        const fromStr = fmt(startsAt);
+        const toStr = fmt(endsAt);
+        const title = escEmail(event.title || 'Game Night');
+        const dashboardUrl = `${FRONTEND_URL}/student-dashboard.html`;
+
+        const html = renderBaseLayout({
+            headerBadge: 'Game Marshal Invitation',
+            headerTitle: '🎮 You are a Game Marshal',
+            headerSubtitle: `For ${title}`,
+            contentTitle: `Hi ${escEmail(name)}, you've been appointed as a game marshal.`,
+            metaRows: [
+                { label: 'Event', value: `<strong>${title}</strong>` },
+                ...(event.location ? [{ label: 'Venue', value: escEmail(event.location) }] : []),
+                { label: 'From', value: escEmail(fromStr) },
+                { label: 'Until', value: escEmail(toStr) }
+            ],
+            extraHtml: `
+                <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; font-size: 13px; color: #166534;">
+                    <strong>What to do:</strong> sign in to the NACOS portal with your school email as usual.
+                    During the times above, a <strong>Game Marshal</strong> section appears on your dashboard.
+                    Open it, then scan each player's ticket QR code (or type their ticket number) and tap
+                    <strong>Mark 1 play</strong> when they play a game. The section closes automatically when your time ends.
+                </div>
+            `,
+            buttonText: 'Open My Dashboard',
+            buttonUrl: dashboardUrl,
+            noticeText: 'If you did not expect this, you can ignore this email or tell a NACOS admin.'
+        });
+
+        return await sendEmail({
+            to: student.email,
+            subject: `🎮 Game Marshal for ${event.title || 'Game Night'} — NACOS TAU`,
+            html,
+            text: `Hi ${name},\n\nYou have been appointed as a game marshal for "${event.title || 'Game Night'}".\nFrom: ${fromStr}\nUntil: ${toStr}\n\nSign in to the NACOS portal with your school email. During these times a Game Marshal section appears on your dashboard: scan each player's ticket QR code (or type the ticket number) and mark plays as they play.\n\n${dashboardUrl}\n\nNACOS TAU Chapter`
+        });
+    } catch (err) {
+        console.error('Failed to send game marshal invitation:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+async function sendHackathonTeamAdminNotificationEmail({ hackathon, registration, leader, teammates = [] }) {
+    try {
+        const configured = String(process.env.HACKATHON_ALERT_EMAILS || '')
+            .split(',').map(e => e.trim()).filter(Boolean);
+        const adminEmail = process.env.ADMIN_EMAIL;
+        const recipients = configured.length
+            ? configured
+            : ['nacos@tau.edu.ng', 'olufemi-abiodun.gbolahan@st.tau.edu.ng'];
+        if (!configured.length && adminEmail && !recipients.includes(adminEmail)) recipients.push(adminEmail);
+
+        const hackTitle = hackathon?.title || 'Hackathon';
+        const teamName = registration?.team_name || 'New team';
+        const leaderName = leader?.name || `${leader?.first_name || ''} ${leader?.last_name || ''}`.trim() || 'Team leader';
+        const teamSize = teammates.length + 1;
+        const maxSize = hackathon?.max_team_size || null;
+        const dateStr = new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
+        const adminUrl = `${FRONTEND_URL}/admin-dashboard.html`;
+
+        const teammatesHtml = teammates.length
+            ? teammates.map(m => `${m.name || 'Member'}${m.role ? ` <span style="color:#64748b;">(${m.role})</span>` : ''}${m.email ? `<br><span style="color:#64748b; font-size:12px;">${m.email}</span>` : ''}`).join('<br>')
+            : '<span style="color:#64748b;">No teammates listed yet (solo or still recruiting)</span>';
+
+        const metaRows = [
+            { label: 'Competition', value: `<strong>${hackTitle}</strong>` },
+            { label: 'Team Name', value: `<strong style="font-size: 16px; color: #157a09;">${teamName}</strong>` },
+            { label: 'Team Size', value: `${teamSize} ${teamSize === 1 ? 'person' : 'people'}${maxSize ? ` (max ${maxSize})` : ''}` },
+            { label: 'Track', value: registration?.track_selected || 'General' },
+            { label: 'Team Leader', value: leaderName },
+            ...(leader?.email ? [{ label: 'Leader Email', value: leader.email }] : []),
+            ...(leader?.matric_no ? [{ label: 'Matric No', value: leader.matric_no }] : []),
+            ...(leader?.phone ? [{ label: 'Leader Phone', value: leader.phone }] : []),
+            ...(leader?.department ? [{ label: 'Department', value: `${leader.department}${leader.current_level ? ` (${leader.current_level} Level)` : ''}` }] : []),
+            { label: 'Teammates', value: teammatesHtml },
+            ...(registration?.is_looking_for_members ? [{ label: 'Recruiting', value: 'Yes, looking for more members' }] : []),
+            { label: 'Registered', value: dateStr }
+        ];
+
+        const html = renderBaseLayout({
+            headerBadge: 'Hackathon Registration',
+            headerTitle: '🧑‍💻 New Team Registered',
+            headerSubtitle: `${teamName} just signed up for ${hackTitle}`,
+            contentTitle: `${teamName} (${teamSize} ${teamSize === 1 ? 'person' : 'people'})`,
+            metaRows,
+            buttonText: 'View Teams in Admin Dashboard',
+            buttonUrl: adminUrl,
+            noticeText: 'NACOS TAU Hackathon Notification'
+        });
+
+        const text = `New team registered for ${hackTitle}\nTeam: ${teamName}\nTeam size: ${teamSize}${maxSize ? ` (max ${maxSize})` : ''}\nTrack: ${registration?.track_selected || 'General'}\nLeader: ${leaderName}${leader?.email ? ` <${leader.email}>` : ''}\nTeammates: ${teammates.map(m => m.name).join(', ') || 'none yet'}\nTime: ${dateStr}\n\nNACOS TAU Portal`;
+
+        return await sendEmail({
+            to: recipients,
+            subject: `🧑‍💻 New Team: ${teamName} registered for ${hackTitle}`,
+            html,
+            text
+        });
+    } catch (err) {
+        console.error('Failed to send hackathon team admin notification:', err);
+    }
+}
+
+// ============================================
 // SEND PAYMENT ALERT TO ADMIN (nacos@tau.edu.ng)
 // ============================================
-async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber }) {
+async function sendPaymentAdminNotificationEmail({ student, event, payment, ticketNumber, games = null }) {
     try {
         const adminEmail = process.env.ADMIN_EMAIL || 'nacos@tau.edu.ng';
         const studentName = student?.name || `${student?.first_name || ''} ${student?.last_name || ''}`.trim() || 'Student';
@@ -1050,7 +1195,14 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
         const metaRows = [
             { label: 'Amount Received', value: `<strong style="font-size: 16px; color: #157a09;">${amountStr}</strong>` },
             { label: 'Paid For', value: `<strong>${eventTitle}</strong>` },
-            ...(event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && payment?.amount ? ` × ${formatNaira(Number(payment.amount) / qty)} each` : ''}` }] : []),
+            ...(gameLinesFor(games)
+                ? [{ label: 'Games', value: gameLinesFor(games).html }, { label: 'Total Plays', value: `<strong>${qty}</strong>` }]
+                : event ? [{ label: 'Tickets', value: `<strong>${qty}</strong>${qty > 1 && (payment?.subtotal_amount ?? payment?.amount) ? ` × ${formatNaira(Number(payment.subtotal_amount ?? payment.amount) / qty)} each` : ''}` }] : []),
+            ...(Number(payment?.service_fee || 0) > 0 ? [
+                { label: gameLinesFor(games) ? 'Game Revenue' : 'Ticket Revenue', value: formatNaira(Number(payment.subtotal_amount ?? payment.amount)) },
+                { label: 'Service Fee', value: formatNaira(Number(payment.service_fee)) }
+            ] : []),
+            ...(payment?.gateway_fee != null && Number(payment.gateway_fee) > 0 ? [{ label: 'Bachs Fee (paid by buyer)', value: formatNaira(Number(payment.gateway_fee)) }] : []),
             { label: 'Student / Payer', value: studentName + (student?.is_guest || payment?.guest_email ? ' <span class="badge" style="background:#fff7ed; color:#9a3412; font-weight:700;">Guest (non-member)</span>' : '') },
             ...(payment?.guest_phone ? [{ label: 'Guest Phone', value: payment.guest_phone }] : []),
             ...(student?.matric_no ? [{ label: 'Matric No', value: student.matric_no }] : []),
@@ -1327,6 +1479,8 @@ module.exports = {
     sendNewStudentAdminNotification,
     sendEventTicketEmail,
     sendPaymentAdminNotificationEmail,
+    sendHackathonTeamAdminNotificationEmail,
+    sendGameMarshalInviteEmail,
     getActiveStudents,
     getEmailTemplate,
     logNotification,

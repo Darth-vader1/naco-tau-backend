@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "regions": [
+    "dub1"
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",
@@ -31,6 +34,12 @@
           "value": "GET,OPTIONS,PATCH,DELETE,POST,PUT"
         }
       ]
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/payments/cleanup-abandoned",
+      "schedule": "0 2 * * *"
     }
   ]
 }

@@ -2,12 +2,14 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../config/supabase');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
 const { auditLog } = require('../middleware/audit');
 const { successResponse, errorResponse, generateTransactionId } = require('../utils/helpers');
 const { sendEventTicketEmail, sendPaymentAdminNotificationEmail } = require('../services/email');
 const crypto = require('crypto');
+const { markAbandonedCheckouts, maybeMarkAbandonedCheckouts } = require('../utils/abandonedCheckouts');
 const rateLimit = require('express-rate-limit');
+const { registerLimiter } = require('../middleware/rateLimitInstances');
 const {
   MAX_TICKETS_PER_ORDER,
   parseTicketQuantity,
@@ -16,6 +18,28 @@ const {
   seatsRemaining,
   syncAttendeeCount
 } = require('../utils/tickets');
+const {
+  getFeeSettings,
+  invalidateFeeSettings,
+  serviceFeePerTicket,
+  orderBreakdown,
+  gatewayFeeOf,
+  gatewayFeePaidByOf,
+  money
+} = require('../utils/fees');
+const {
+  loadEventItems,
+  playsRemainingForItem,
+  titleWithGames,
+  gamesSummary,
+  playsLabel,
+  parseGameLines,
+  linesFromRow,
+  priceGameLines,
+  gameBreakdown,
+  gameColumns,
+  describeGameOrder
+} = require('../utils/games');
 
 // ============================================
 // PAYMENT SAFETY HELPERS
@@ -31,6 +55,31 @@ const isPaymentSimulationAllowed = () =>
 
 const isBachsKeyConfigured = (key) => !!key && !key.includes('placeholder');
 
+// ---- Gateway response helpers ----------------------------------------------
+// Bachs (like most gateways) reports state in several fields and uses
+// different words for "paid" (e.g. status "complete" + payment_status "paid").
+// A payment counts as paid if ANY status field says so.
+const PAID_STATES = new Set(['completed', 'complete', 'success', 'successful', 'succeeded', 'paid', 'captured', 'settled']);
+const statusFieldsOf = (obj = {}) =>
+  [obj.status, obj.payment_status, obj.paymentStatus, obj.state, obj.charge?.status, obj.payment?.status]
+    .filter(v => typeof v === 'string' && v.trim())
+    .map(v => v.trim().toLowerCase());
+const isGatewayPaid = (obj = {}) => obj.paid === true || statusFieldsOf(obj).some(s => PAID_STATES.has(s));
+const describeGatewayStatus = (obj = {}) => statusFieldsOf(obj).join('/');
+
+// Every identifier a gateway object may carry. Checkout-session IDs come first:
+// they are what our server records when a checkout starts (chk_...), while
+// "id" on a payment/charge event is the charge ID (ch_...).
+const gatewayIdsOf = (obj = {}) => {
+  const ids = [
+    obj.checkout_id, obj.checkout_session_id, obj.checkoutSessionId, obj.session_id,
+    obj.checkout?.id, obj.checkout_session?.id, obj.session?.id,
+    obj.metadata?.checkout_id, obj.metadata?.checkout_session_id,
+    obj.id, obj.reference, obj.payment_id, obj.charge_id, obj.charge?.id, obj.code
+  ];
+  return [...new Set(ids.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+};
+
 // Constant-time string comparison (returns false on length mismatch).
 const safeEqual = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -43,7 +92,7 @@ const safeEqual = (a, b) => {
  * Load a payable event and its authoritative price (in Naira) from the DB.
  * The client-supplied amount is never trusted.
  */
-async function loadPayableEvent(eventId, { guest = false } = {}) {
+async function loadPayableEvent(eventId, { guest = false, lines = null, settling = false } = {}) {
   const { data: event, error } = await supabase
     .from('events')
     .select('*')
@@ -51,6 +100,21 @@ async function loadPayableEvent(eventId, { guest = false } = {}) {
     .maybeSingle();
   if (error) throw error;
   if (!event) return { error: 'Target event not found', status: 404 };
+
+  // Game events: the buyer picks one or more games, each with a number of
+  // plays; every game is priced PER PLAY. The order quantity is total plays.
+  const items = await loadEventItems(event.id);
+  // Game lines sent for an event that has no games: refuse, so the order
+  // can't fall through to ticket pricing with no quantity (a ₦0 checkout).
+  if (!items.length && lines && lines.length && !settling) {
+    return { error: 'This event has no games to choose from.', status: 400 };
+  }
+  if (items.length || (settling && lines && lines.length)) {
+    if (!lines || !lines.length) return { error: 'Please choose at least one game.', status: 400 };
+    const game = await priceGameLines(event, lines, { guest, settling, activeItems: items });
+    if (game.error) return game;
+    return { event, game, price: game.lines.length === 1 ? game.lines[0].unit_price : null };
+  }
 
   if (guest) {
     // Non-members pay the per-event guest price, only when the admin has
@@ -68,6 +132,28 @@ async function loadPayableEvent(eventId, { guest = false } = {}) {
   }
   return { event, price };
 }
+
+/** Refuse an order that asks for more plays of a game than it has left. */
+async function gameCapacityError(game) {
+  if (!game) return null;
+  for (const l of game.lines) {
+    const left = await playsRemainingForItem(l._item || { id: l.item_id });
+    if (l.plays > left) {
+      return left === 0 ? `${l.name} is fully booked.` : `Only ${left} play(s) of ${l.name} left.`;
+    }
+  }
+  return null;
+}
+
+/** "FIFA × 2, Ludo × 1 (3 plays)" or "2 tickets" for checkout labels. */
+const orderLabel = (game, quantity) => game
+  ? `${gamesSummary(game.lines)}${game.lines.length > 1 ? ` (${playsLabel(quantity)})` : `, ${playsLabel(quantity)}`}`
+  : `${quantity} ticket${quantity > 1 ? 's' : ''}`;
+
+/** Public view of the games in an order. */
+const publicGames = (lines) => lines && lines.length
+  ? lines.map(l => ({ id: l.item_id, name: l.name, plays: l.plays, ...(l.unit_price != null ? { unit_price: l.unit_price } : {}) }))
+  : null;
 
 /**
  * Build a simulated (fake) payment-session response — local development only.
@@ -136,9 +222,12 @@ async function issueEventTicket({ payment, event }) {
     };
   }
 
+  // Game orders (pay per play) can always be repeated: play once, buy again.
+  const gameLines = await describeGameOrder(payment);
+
   // Without "Allow repeat purchases", a member keeps a single paid order per
   // event: a second payment is logged as a refund case instead of a ticket.
-  if (userId && !event.allow_repeat_orders) {
+  if (userId && !event.allow_repeat_orders && !gameLines) {
     const { data: priorPaid, error: priorErr } = await supabase
       .from('event_registrations')
       .select('*')
@@ -169,7 +258,8 @@ async function issueEventTicket({ payment, event }) {
       registration_date: new Date().toISOString(),
       status: 'registered',
       linked_payment_id: payment.id,
-      ticket_quantity: quantityOf(payment)
+      ticket_quantity: quantityOf(payment),
+      ...(gameLines ? gameColumns(gameLines) : {})
     }])
     .select()
     .single();
@@ -189,6 +279,9 @@ async function issueEventTicket({ payment, event }) {
 
   await syncAttendeeCount(event.id);
 
+  // Tickets and admin emails name the games, e.g. "Game Night: FIFA × 2, Ludo × 1".
+  const emailEvent = gameLines ? { ...event, title: titleWithGames(event, gameLines) } : event;
+
   // Notifications are awaited (bounded) so a serverless platform cannot freeze
   // the function before they are sent, but a slow mail provider can't block
   // the buyer's confirmation for long either.
@@ -202,13 +295,14 @@ async function issueEventTicket({ payment, event }) {
         recipient = student;
       }
       if (recipient && recipient.email) {
-        await sendEventTicketEmail({ student: recipient, event, ticketNumber, payment });
+        await sendEventTicketEmail({ student: recipient, event: emailEvent, ticketNumber, payment, games: gameLines });
       }
       await sendPaymentAdminNotificationEmail({
         student: recipient || { name: 'Student', email: '' },
-        event,
+        event: emailEvent,
         payment,
-        ticketNumber
+        ticketNumber,
+        games: gameLines
       });
       if (!isGuest) {
         try {
@@ -244,21 +338,34 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       return errorResponse(res, 'event_id is required to start a checkout session', 400);
     }
 
-    const quantity = parseTicketQuantity(req.body.quantity);
-    if (!quantity) {
+    const picked = parseGameLines(req.body, req.body.quantity);
+    if (picked.error) return errorResponse(res, picked.error, 400);
+    let quantity = picked.lines ? null : parseTicketQuantity(req.body.quantity);
+    if (!picked.lines && !quantity) {
       return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
     }
 
-    const payable = await loadPayableEvent(event_id);
+    const payable = await loadPayableEvent(event_id, { lines: picked.lines });
     if (payable.error) {
       return errorResponse(res, payable.error, payable.status);
     }
-    const unitPrice = payable.price;
-    const price = orderTotal(unitPrice, quantity); // total charged for this order
+    const game = payable.game || null;
+    if (game) quantity = game.quantity;
+    const unitPrice = game ? null : payable.price;
+    const feeSettings = await getFeeSettings();
+    const feePerTicket = serviceFeePerTicket(payable.event, feeSettings, { guest: false });
+    const breakdown = game
+      ? gameBreakdown(game, feePerTicket)
+      : orderBreakdown({ unitPrice, quantity, feePerTicket });
+    const price = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
+    // Never open a checkout for nothing (or less), whatever the request said.
+    if (!(Number.isFinite(price) && price > 0) || !(breakdown.quantity > 0)) {
+      return errorResponse(res, 'This order could not be priced. Please choose your tickets again.', 400);
+    }
 
     // One order per student per event unless the admin has switched on
-    // "Allow repeat purchases" for this event (e.g. game night).
-    if (!payable.event.allow_repeat_orders) {
+    // "Allow repeat purchases" for this event. Games are always pay-per-play.
+    if (!payable.event.allow_repeat_orders && !game) {
       const { data: existingRegs, error: existingRegErr } = await supabase
         .from('event_registrations')
         .select('id, ticket_quantity')
@@ -277,6 +384,8 @@ router.post('/bachs-session', authenticate, async (req, res) => {
         ? 'This event is fully booked.'
         : `Only ${remaining} ticket(s) left for this event.`, 409);
     }
+    const capErr = await gameCapacityError(game);
+    if (capErr) return errorResponse(res, capErr, 409);
 
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
@@ -291,7 +400,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
 
     // Format amount with 2 decimal places as required by Bachs pricing schema
     const formattedAmount = price.toFixed(2);
-    const ticketLabel = `${quantity} ticket${quantity > 1 ? 's' : ''}`;
+    const ticketLabel = orderLabel(game, quantity);
 
     // Call Bachs API to create a session with documented pricing source
     const payload = {
@@ -304,7 +413,9 @@ router.post('/bachs-session', authenticate, async (req, res) => {
         name: req.user?.name || 'Student'
       },
       success_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=success&event_id=${encodeURIComponent(event_id)}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`
+      cancel_url: `${process.env.FRONTEND_URL || 'https://nacosportal.vercel.app'}/events.html?payment=cancelled`,
+      // Bachs adds its processing fee on top for the buyer, so NACOS receives the full amount.
+      ...(feeSettings.customer_bears_gateway_fee ? { customer_bears_fee: true } : {})
     };
 
     // Automatically determine base URL
@@ -359,7 +470,10 @@ router.post('/bachs-session', authenticate, async (req, res) => {
           user_id: req.userId,
           event_id: payable.event.id,
           amount: price,
+          subtotal_amount: breakdown.subtotal_amount,
+          service_fee: breakdown.service_fee,
           ticket_quantity: quantity,
+          ...(game ? gameColumns(game.lines) : {}),
           payment_type: 'event_registration',
           transaction_id: String(checkoutId),
           payment_proof_url: receiptUrlFor(String(checkoutId)),
@@ -382,8 +496,9 @@ router.post('/bachs-session', authenticate, async (req, res) => {
       checkout_id: checkoutId,
       payment_id: paymentId,
       quantity,
-      unit_price: unitPrice,
-      total_amount: price
+      ...(game ? { games: publicGames(game.lines) } : {}),
+      ...breakdown,
+      gateway_fee_added_at_checkout: !!feeSettings.customer_bears_gateway_fee
     }, 'Session created successfully');
   } catch (error) {
     console.error('Bachs checkout session error:', error);
@@ -576,6 +691,30 @@ router.get('/receipt/:reference', async (req, res) => {
       event = evResult.data || null;
       registration = regResult.data || null;
     }
+    const receiptGames = await describeGameOrder(payment);
+    if (event && receiptGames) event = { ...event, title: titleWithGames(event, receiptGames) };
+
+    // Game tickets: plays used so far (marked by game marshals) and when.
+    let receiptGamesView = publicGames(receiptGames);
+    if (receiptGamesView && registration) {
+      const { data: usedRows, error: usedErr } = await supabase
+        .from('game_plays')
+        .select('item_id, plays, created_at')
+        .eq('registration_id', registration.id)
+        .order('created_at', { ascending: true });
+      if (usedErr) console.warn('[receipt] could not load plays used:', usedErr.message);
+      const used = usedErr ? [] : (usedRows || []);
+      receiptGamesView = receiptGamesView.map(g => {
+        const mine = used.filter(u => u.item_id === g.id);
+        const usedPlays = mine.reduce((sum, u) => sum + (u.plays || 0), 0);
+        return {
+          ...g,
+          used: usedPlays,
+          left: Math.max(0, g.plays - usedPlays),
+          used_at: mine.flatMap(u => Array(Math.max(1, u.plays || 1)).fill(u.created_at))
+        };
+      });
+    }
 
     const ticketNumber = registration?.ticket_number ||
       ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') +
@@ -586,14 +725,24 @@ router.get('/receipt/:reference', async (req, res) => {
     const publicPayload = {
       ticket_number: ticketNumber,
       ticket_quantity: ticketQuantity,
-      unit_price: Math.round((Number(payment.amount) / ticketQuantity) * 100) / 100,
+      games: receiptGamesView,
+      unit_price: money(Number(payment.subtotal_amount ?? payment.amount) / ticketQuantity),
+      subtotal_amount: Number(payment.subtotal_amount ?? payment.amount),
+      service_fee: Number(payment.service_fee || 0),
+      gateway_fee: payment.gateway_fee != null ? Number(payment.gateway_fee) : null,
       status: payment.status,
       payment_type: payment.payment_type,
       amount: payment.amount,
       verified_at: payment.verified_at,
       submitted_at: payment.submitted_at,
       event,
-      registration
+      // Ticket status only: no buyer name, email, phone or account id, since
+      // anyone holding the receipt link can open this.
+      registration: registration ? {
+        status: registration.status,
+        ticket_quantity: registration.ticket_quantity,
+        registration_date: registration.registration_date
+      } : null
     };
 
     // Owners additionally receive their own student details
@@ -685,13 +834,10 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
     }
 
     const sessionObj = verifyData?.data || verifyData || {};
-    const sessionStatus = String(sessionObj.status || sessionObj.payment_status || sessionObj.state || '').toLowerCase();
-    const isPaidOrCompleted =
-      sessionStatus === 'completed' ||
-      sessionStatus === 'success' ||
-      sessionStatus === 'successful' ||
-      sessionStatus === 'paid' ||
-      sessionObj.paid === true;
+    const sessionStatus = describeGatewayStatus(sessionObj);
+    const isPaidOrCompleted = isGatewayPaid(sessionObj);
+    // IDs/status only (no customer data) so failed confirmations can be diagnosed from the logs.
+    console.log(`[Bachs] verify ${reference}: http=${verifyRes ? verifyRes.status : 'none'} status=${sessionStatus || 'none'} paid=${isPaidOrCompleted} ids=${gatewayIdsOf(sessionObj).join(',')}`);
 
     if (!verifyRes || !verifyRes.ok || !isPaidOrCompleted) {
       if (isPaymentSimulationAllowed()) {
@@ -735,7 +881,10 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
         currency,
         channel: sessionObj.mode || sessionObj.channel || 'online checkout',
         reference: sessionObj.id || sessionObj.checkout_id || sessionObj.reference || reference,
-        paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString()
+        paid_at: sessionObj.completed_at || sessionObj.paid_at || new Date().toISOString(),
+        // Bachs processing fee, if reported (naira), and who paid it
+        gateway_fee: gatewayFeeOf(sessionObj),
+        gateway_fee_paid_by: gatewayFeePaidByOf(sessionObj)
       }
     };
   } catch (err) {
@@ -749,7 +898,7 @@ async function checkGatewayPayment({ reference, expectedAmount, expectedEmail, l
  * payment and issue the event ticket. Shared by /verify-paystack (redirect
  * return) and /:id/recheck (student-initiated recovery). Idempotent.
  */
-async function verifyAndSettle(req, res, { reference, event_id, quantity: requestedQuantity }) {
+async function verifyAndSettle(req, res, { reference, event_id, quantity: requestedQuantity, item_id: requestedItemId, items: requestedItems }) {
   try {
     // This endpoint only settles event tickets; the price must come from an event.
     const payment_type = 'event_registration';
@@ -762,15 +911,7 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
       return errorResponse(res, 'event_id is required for event registration payments', 400);
     }
 
-    // 1. Fetch event details and its authoritative price (Naira)
-    const payable = await loadPayableEvent(event_id);
-    if (payable.error) {
-      return errorResponse(res, payable.error, payable.status);
-    }
-    const targetEvent = payable.event;
-    const unitPrice = payable.price;
-
-    // 2. Prevent replay: a reference belongs to exactly one user AND one event
+    // 1. The order recorded when checkout started (if any)
     const { data: existingPayment, error: existingPayErr } = await supabase
       .from('payments')
       .select('*')
@@ -778,6 +919,25 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
       .maybeSingle();
 
     if (existingPayErr) throw existingPayErr;
+
+    // 2. Fetch event details and its authoritative price (Naira). For game
+    //    events the games recorded on the order win over what the browser sends.
+    const recordedLines = existingPayment && existingPayment.event_id === event_id ? linesFromRow(existingPayment) : null;
+    let lines = recordedLines;
+    if (!lines) {
+      const picked = parseGameLines({ items: requestedItems, item_id: requestedItemId }, requestedQuantity);
+      if (picked.error) return errorResponse(res, picked.error, 400);
+      lines = picked.lines;
+    }
+    const payable = await loadPayableEvent(event_id, { lines, settling: true });
+    if (payable.error) {
+      return errorResponse(res, payable.error, payable.status);
+    }
+    const targetEvent = payable.event;
+    const unitPrice = payable.price;
+    const game = payable.game || null;
+
+    // Prevent replay: a reference belongs to exactly one user AND one event
 
     if (existingPayment && existingPayment.user_id && existingPayment.user_id !== req.userId) {
       return errorResponse(res, 'This payment reference is already associated with another account.', 403);
@@ -810,17 +970,30 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
     let quantity;
     if (existingPayment && existingPayment.event_id === targetEvent.id && existingPayment.ticket_quantity) {
       quantity = quantityOf(existingPayment);
+    } else if (game) {
+      quantity = game.quantity;
     } else {
       quantity = parseTicketQuantity(requestedQuantity);
       if (!quantity) {
         return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
       }
     }
-    // A checkout recorded by the server is held to the total quoted when it
-    // started (so a later admin price change can't break a paid order).
-    const expectedAmount = (existingPayment && isOnlineCheckoutRow(existingPayment) && existingPayment.status === 'pending' && Number(existingPayment.amount) > 0)
-      ? Number(existingPayment.amount)
-      : orderTotal(unitPrice, quantity);
+    // A checkout recorded by the server is held to the total (tickets + service
+    // fee) quoted when it started, so a later price or fee change can't break a
+    // paid order. Without one, price it now with the current fee settings.
+    const fromRecordedCheckout = !!(existingPayment && isOnlineCheckoutRow(existingPayment) &&
+      (existingPayment.status === 'pending' || existingPayment.status === 'abandoned') && Number(existingPayment.amount) > 0);
+    const feeSettings = await getFeeSettings();
+    const priced = fromRecordedCheckout
+      ? {
+          total_amount: money(existingPayment.amount),
+          subtotal_amount: money(existingPayment.subtotal_amount ?? existingPayment.amount),
+          service_fee: money(existingPayment.service_fee || 0)
+        }
+      : game
+        ? gameBreakdown(game, serviceFeePerTicket(targetEvent, feeSettings, { guest: false }))
+        : orderBreakdown({ unitPrice, quantity, feePerTicket: serviceFeePerTicket(targetEvent, feeSettings, { guest: false }) });
+    const expectedAmount = priced.total_amount;
 
     // Capacity check (skipped when this order already has its tickets, e.g. a retried verification)
     let alreadyIssued = false;
@@ -840,6 +1013,8 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
           ? `Event is fully booked (${targetEvent.max_attendees} tickets issued).`
           : `Only ${remaining} ticket(s) left for this event.`, 409);
       }
+      const capErr = await gameCapacityError(game);
+      if (capErr) return errorResponse(res, capErr, 409);
     }
 
     // 3. Confirm with the gateway (amount, currency, payer)
@@ -854,7 +1029,15 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
     }
     const verifiedPaymentData = gw.data;
 
-    const paidAmount = verifiedPaymentData.amount / 100;
+    // Store our breakdown (tickets + service fee). The gateway's figure may
+    // include the Bachs fee the buyer paid on top, which is recorded separately.
+    const paidAmount = priced.total_amount;
+    const feeColumns = {
+      subtotal_amount: priced.subtotal_amount,
+      service_fee: priced.service_fee,
+      ...(verifiedPaymentData.gateway_fee != null ? { gateway_fee: verifiedPaymentData.gateway_fee } : {}),
+      ...(verifiedPaymentData.gateway_fee_paid_by ? { gateway_fee_paid_by: verifiedPaymentData.gateway_fee_paid_by } : {})
+    };
 
     // 4. Save/update payment record in database
     let paymentRecord = existingPayment;
@@ -865,11 +1048,13 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
         .insert([{
           user_id: req.userId,
           amount: paidAmount,
+          ...feeColumns,
           ticket_quantity: quantity,
+          ...(game ? gameColumns(game.lines) : {}),
           payment_type: payment_type,
           transaction_id: reference,
           payment_proof_url: receiptUrlFor(reference),
-          description: `Online payment for event: ${targetEvent.title} (${quantity} ticket${quantity > 1 ? 's' : ''})`,
+          description: `Online payment for event: ${targetEvent.title} (${orderLabel(game, quantity)})`,
           event_id: targetEvent ? targetEvent.id : null,
           status: 'verified',
           verified_by: req.userId,
@@ -889,11 +1074,13 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
         event_id: targetEvent.id,
         user_id: req.userId,
         payment_type,
-        ticket_quantity: quantity
+        ticket_quantity: quantity,
+        ...(game ? gameColumns(game.lines) : {})
       };
       if (paymentRecord.status !== 'verified') {
         Object.assign(updates, {
           amount: paidAmount,
+          ...feeColumns,
           status: 'verified',
           verified_by: req.userId,
           verified_at: new Date().toISOString(),
@@ -945,9 +1132,13 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
       ticket_quantity: quantityOf(registrationRecord || paymentRecord),
       unit_price: unitPrice,
       total_amount: Number(paymentRecord.amount),
+      subtotal_amount: Number(paymentRecord.subtotal_amount ?? paymentRecord.amount),
+      service_fee: Number(paymentRecord.service_fee || 0),
+      gateway_fee: paymentRecord.gateway_fee != null ? Number(paymentRecord.gateway_fee) : null,
+      games: game ? publicGames(game.lines) : null,
       event: targetEvent ? {
         id: targetEvent.id,
-        title: targetEvent.title,
+        title: titleWithGames(targetEvent, game ? game.lines : null),
         date: targetEvent.date,
         time: targetEvent.time,
         location: targetEvent.location,
@@ -963,7 +1154,7 @@ async function verifyAndSettle(req, res, { reference, event_id, quantity: reques
 
 // Student returns from the gateway (redirect / inline success callback)
 router.post('/verify-paystack', authenticate, (req, res) =>
-  verifyAndSettle(req, res, { reference: req.body?.reference, event_id: req.body?.event_id, quantity: req.body?.quantity })
+  verifyAndSettle(req, res, { reference: req.body?.reference, event_id: req.body?.event_id, quantity: req.body?.quantity, item_id: req.body?.item_id, items: req.body?.items })
 );
 
 // ============================================
@@ -1011,14 +1202,15 @@ router.post('/:id/recheck', authenticate, async (req, res) => {
 // only for events the admin has opened to the public. The ticket is emailed
 // to the address they give; they recover it with reference + email.
 
-const guestLimiter = rateLimit({
+const guestLimiter = registerLimiter('guest', (store) => rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Math.max(1, parseInt(process.env.GUEST_CHECKOUT_RATE_LIMIT || '20', 10)),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many guest checkout attempts. Please try again in a few minutes.' },
-  validate: { trustProxy: false }
-});
+  validate: { trustProxy: false },
+  store
+}));
 
 const GUEST_EMAIL_RE = /^[^\s@<>"']+@[^\s@<>"']+\.[A-Za-z]{2,}$/;
 const MEMBER_EMAIL_RE = /@(st\.)?tau\.edu\.ng$/i;
@@ -1051,22 +1243,148 @@ const publicEventSummary = (ev) => ev ? {
   public_price: ev.public_price
 } : null;
 
+/**
+ * Confirm a server-recorded online order (member or guest) with the gateway,
+ * using the checkout ID we saved when it started, then issue its tickets.
+ * Idempotent: an already-verified order just returns its ticket.
+ *
+ * Returns { ok: true, settled, ticketNumber, newlyIssued } or { ok: false, status, error }.
+ */
+async function confirmOnlineOrder({ payment, event, source }) {
+  const quantity = quantityOf(payment);
+  let settled = payment;
+
+  if (payment.status !== 'verified') {
+    // Seats were checked at checkout; re-check only if this order has no tickets yet.
+    const { data: orderReg } = await supabase.from('event_registrations').select('id').eq('linked_payment_id', payment.id).limit(1);
+    if (!(Array.isArray(orderReg) && orderReg.length)) {
+      const remaining = await seatsRemaining(event);
+      if (quantity > remaining) {
+        return { ok: false, status: 409, error: 'This event filled up before the payment was confirmed. Please contact the organisers for a refund.' };
+      }
+    }
+
+    let expectedEmail = payment.guest_email || null;
+    if (!expectedEmail && payment.user_id) {
+      const { data: st } = await supabase.from('students').select('email').eq('user_id', payment.user_id).maybeSingle();
+      expectedEmail = st?.email || null;
+    }
+
+    const gw = await checkGatewayPayment({
+      reference: payment.transaction_id,
+      expectedAmount: Number(payment.amount),
+      expectedEmail,
+      logContext: `${source}, order ${payment.id}`
+    });
+    if (!gw.ok) return { ok: false, status: gw.status, error: gw.error };
+
+    const tag = payment.guest_email && !payment.user_id ? '[guest] ' : '';
+    const { data: updated, error: updErr } = await supabase
+      .from('payments')
+      .update({
+        // Keep the recorded breakdown (tickets + service fee); the Bachs fee the
+        // buyer paid on top is stored separately when Bachs reports it.
+        amount: money(payment.amount) > 0 ? money(payment.amount) : gw.data.amount / 100,
+        subtotal_amount: payment.subtotal_amount ?? money(payment.amount),
+        service_fee: money(payment.service_fee || 0),
+        ...(gw.data.gateway_fee != null ? { gateway_fee: gw.data.gateway_fee } : {}),
+        ...(gw.data.gateway_fee_paid_by ? { gateway_fee_paid_by: gw.data.gateway_fee_paid_by } : {}),
+        status: 'verified',
+        verified_at: new Date().toISOString(),
+        notes: `${tag}Verified via Bachs ${source} (${gw.data.channel || 'online checkout'})`
+      })
+      .eq('id', payment.id)
+      .neq('status', 'verified')
+      .select()
+      .maybeSingle();
+    if (updErr) throw updErr;
+    if (updated) {
+      settled = updated;
+    } else {
+      const { data: fresh } = await supabase.from('payments').select('*').eq('id', payment.id).maybeSingle();
+      settled = fresh || payment;
+    }
+  }
+
+  const { ticketNumber, newlyIssued } = await issueEventTicket({ payment: settled, event });
+  return { ok: true, settled, ticketNumber, newlyIssued };
+}
+
+// ============================================
+// ADMIN: RE-CHECK AN ONLINE CHECKOUT WITH THE GATEWAY
+// ============================================
+// Online checkouts can't be approved by hand (an unpaid one looks the same as
+// a paid one). This asks Bachs directly, using the checkout ID recorded when
+// the checkout started, and issues the tickets if it is paid in full.
+router.post('/:id/gateway-recheck', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return errorResponse(res, 'Invalid payment id', 400);
+
+    const { data: payment, error } = await supabase.from('payments').select('*').eq('id', id).maybeSingle();
+    if (error) throw error;
+    if (!payment) return errorResponse(res, 'Payment not found', 404);
+    if (!payment.transaction_id || !payment.event_id) {
+      return errorResponse(res, 'This payment has no gateway checkout to re-check.', 400);
+    }
+    if (payment.status === 'rejected') {
+      return errorResponse(res, 'This payment was rejected.', 409);
+    }
+
+    const { data: event, error: evErr } = await supabase.from('events').select('*').eq('id', payment.event_id).maybeSingle();
+    if (evErr) throw evErr;
+    if (!event) return errorResponse(res, 'Linked event not found.', 404);
+
+    const outcome = await confirmOnlineOrder({ payment, event, source: 'admin re-check' });
+    if (!outcome.ok) return errorResponse(res, outcome.error, outcome.status);
+
+    await auditLog({
+      action: 'payment_gateway_rechecked',
+      userId: req.userId,
+      details: {
+        payment_id: payment.id,
+        reference: payment.transaction_id,
+        ticket_number: outcome.ticketNumber,
+        ticket_quantity: quantityOf(outcome.settled),
+        newly_issued: outcome.newlyIssued
+      },
+      ip: req.ip
+    });
+
+    return successResponse(res, {
+      payment: outcome.settled,
+      ticket_number: outcome.ticketNumber,
+      ticket_quantity: quantityOf(outcome.settled),
+      newly_issued: outcome.newlyIssued
+    }, outcome.newlyIssued
+      ? 'Payment confirmed by the gateway. Ticket issued and emailed.'
+      : 'Payment already confirmed. Ticket was issued earlier.');
+  } catch (err) {
+    console.error('Admin gateway re-check error:', err);
+    return errorResponse(res, 'Could not re-check this payment. Please try again.', 500);
+  }
+});
+
 router.post('/guest-session', guestLimiter, async (req, res) => {
   try {
     const { event_id } = req.body || {};
     if (!event_id) return errorResponse(res, 'event_id is required', 400);
 
-    const quantity = parseTicketQuantity(req.body.quantity);
-    if (!quantity) {
+    const picked = parseGameLines(req.body, req.body.quantity);
+    if (picked.error) return errorResponse(res, picked.error, 400);
+    let quantity = picked.lines ? null : parseTicketQuantity(req.body.quantity);
+    if (!picked.lines && !quantity) {
       return errorResponse(res, `You can buy between 1 and ${MAX_TICKETS_PER_ORDER} tickets per order.`, 400);
     }
 
     const guest = parseGuestDetails(req.body);
     if (guest.error) return errorResponse(res, guest.error, 400);
 
-    const payable = await loadPayableEvent(event_id, { guest: true });
+    const payable = await loadPayableEvent(event_id, { guest: true, lines: picked.lines });
     if (payable.error) return errorResponse(res, payable.error, payable.status);
     if (payable.event.is_active === false) return errorResponse(res, 'This event is no longer available.', 400);
+    const game = payable.game || null;
+    if (game) quantity = game.quantity;
 
     if (await isMemberEmail(guest.email)) {
       return errorResponse(res, 'This email belongs to a NACOS member. Please sign in to buy at the member price.', 409);
@@ -1076,10 +1394,19 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
     if (quantity > remaining) {
       return errorResponse(res, remaining === 0 ? 'This event is fully booked.' : `Only ${remaining} ticket(s) left for this event.`, 409);
     }
+    const capErr = await gameCapacityError(game);
+    if (capErr) return errorResponse(res, capErr, 409);
 
     const unitPrice = payable.price;
-    const total = orderTotal(unitPrice, quantity);
-    const ticketLabel = `${quantity} ticket${quantity > 1 ? 's' : ''}`;
+    const feeSettings = await getFeeSettings();
+    const feePerTicket = serviceFeePerTicket(payable.event, feeSettings, { guest: true });
+    const breakdown = game ? gameBreakdown(game, feePerTicket) : orderBreakdown({ unitPrice, quantity, feePerTicket });
+    const total = breakdown.total_amount; // tickets + service fee (Bachs adds its own fee on top)
+    // Never open a checkout for nothing (or less), whatever the request said.
+    if (!(Number.isFinite(total) && total > 0) || !(breakdown.quantity > 0)) {
+      return errorResponse(res, 'This order could not be priced. Please choose your tickets again.', 400);
+    }
+    const ticketLabel = orderLabel(game, quantity);
 
     let checkoutId = null;
     let checkoutUrl = null;
@@ -1099,7 +1426,8 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
         pricing: { amount: total.toFixed(2), currency: 'NGN' },
         customer: { email: guest.email, name: guest.name },
         success_url: `${frontendBase()}/events.html?payment=success&guest=1&event_id=${encodeURIComponent(event_id)}`,
-        cancel_url: `${frontendBase()}/events.html?payment=cancelled`
+        cancel_url: `${frontendBase()}/events.html?payment=cancelled`,
+        ...(feeSettings.customer_bears_gateway_fee ? { customer_bears_fee: true } : {})
       };
 
       let gwRes = null;
@@ -1141,7 +1469,10 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
         guest_phone: guest.phone,
         event_id: payable.event.id,
         amount: total,
+        subtotal_amount: breakdown.subtotal_amount,
+        service_fee: breakdown.service_fee,
         ticket_quantity: quantity,
+        ...(game ? gameColumns(game.lines) : {}),
         payment_type: 'event_registration',
         transaction_id: String(checkoutId),
         payment_proof_url: receiptUrlFor(String(checkoutId)),
@@ -1162,8 +1493,9 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
       checkout_id: String(checkoutId),
       payment_id: intent.id,
       quantity,
-      unit_price: unitPrice,
-      total_amount: total,
+      ...(game ? { games: publicGames(game.lines) } : {}),
+      ...breakdown,
+      gateway_fee_added_at_checkout: !!feeSettings.customer_bears_gateway_fee,
       ...(isSimulation ? { is_simulation: true } : {})
     }, 'Guest checkout created');
   } catch (error) {
@@ -1206,48 +1538,9 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
     if (!event) return errorResponse(res, 'Event not found.', 404);
 
     const quantity = quantityOf(payment);
-    let settled = payment;
-
-    if (payment.status !== 'verified') {
-      // Seats were checked at checkout; re-check only if this order has no tickets yet.
-      const { data: orderReg } = await supabase.from('event_registrations').select('id').eq('linked_payment_id', payment.id).limit(1);
-      if (!(Array.isArray(orderReg) && orderReg.length)) {
-        const remaining = await seatsRemaining(event);
-        if (quantity > remaining) {
-          return errorResponse(res, 'This event filled up before your payment was confirmed. Please contact the organisers for a refund.', 409);
-        }
-      }
-
-      const gw = await checkGatewayPayment({
-        reference,
-        expectedAmount: Number(payment.amount),
-        expectedEmail: payment.guest_email,
-        logContext: `guest order ${payment.id}`
-      });
-      if (!gw.ok) return errorResponse(res, gw.error, gw.status);
-
-      const { data: updated, error: updErr } = await supabase
-        .from('payments')
-        .update({
-          amount: gw.data.amount / 100,
-          status: 'verified',
-          verified_at: new Date().toISOString(),
-          notes: `[guest] Verified via Bachs (${gw.data.channel || 'online checkout'})`
-        })
-        .eq('id', payment.id)
-        .neq('status', 'verified')
-        .select()
-        .maybeSingle();
-      if (updErr) throw updErr;
-      if (updated) {
-        settled = updated;
-      } else {
-        const { data: fresh } = await supabase.from('payments').select('*').eq('id', payment.id).maybeSingle();
-        settled = fresh || payment;
-      }
-    }
-
-    const { ticketNumber, newlyIssued } = await issueEventTicket({ payment: settled, event });
+    const outcome = await confirmOnlineOrder({ payment, event, source: 'guest lookup' });
+    if (!outcome.ok) return errorResponse(res, outcome.error, outcome.status);
+    const { settled, ticketNumber, newlyIssued } = outcome;
 
     if (newlyIssued) {
       await auditLog({
@@ -1262,7 +1555,10 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
       ticket_number: ticketNumber,
       ticket_quantity: quantity,
       total_amount: Number(settled.amount),
-      unit_price: Math.round((Number(settled.amount) / quantity) * 100) / 100,
+      subtotal_amount: Number(settled.subtotal_amount ?? settled.amount),
+      service_fee: Number(settled.service_fee || 0),
+      gateway_fee: settled.gateway_fee != null ? Number(settled.gateway_fee) : null,
+      unit_price: money(Number(settled.subtotal_amount ?? settled.amount) / quantity),
       payment: {
         id: settled.id,
         transaction_id: settled.transaction_id,
@@ -1271,11 +1567,192 @@ router.post('/guest-verify', guestLimiter, async (req, res) => {
         ticket_quantity: quantity
       },
       guest: { name: settled.guest_name, email: settled.guest_email },
-      event: publicEventSummary(event)
+      ...await (async () => {
+        const summary = publicEventSummary(event);
+        const gLines = await describeGameOrder(settled);
+        return gLines
+          ? { event: { ...summary, title: titleWithGames(event, gLines) }, games: publicGames(gLines) }
+          : { event: summary, games: null };
+      })()
     }, 'Payment confirmed. Your ticket has been emailed to you.');
   } catch (error) {
     console.error('Guest verify error:', error);
     return errorResponse(res, 'Could not confirm payment. Please try again.', 500);
+  }
+});
+
+// ============================================
+// TICKET FEE SETTINGS
+// ============================================
+// Public: what buyers will pay on top of the ticket price, so the events page
+// can show the full breakdown BEFORE checkout.
+router.get('/fees', async (req, res) => {
+  try {
+    const s = await getFeeSettings();
+    return successResponse(res, {
+      member_service_fee: s.member_service_fee,
+      guest_service_fee: s.guest_service_fee,
+      gateway_fee_added_at_checkout: s.customer_bears_gateway_fee
+    }, 'Ticket fees');
+  } catch (error) {
+    console.error('Fee settings read error:', error);
+    return errorResponse(res, 'Could not load ticket fees', 500);
+  }
+});
+
+// Admin: read the full settings.
+router.get('/fee-settings', authenticate, requireAdmin, async (req, res) => {
+  try {
+    return successResponse(res, await getFeeSettings({ fresh: true }), 'Fee settings');
+  } catch (error) {
+    return errorResponse(res, 'Could not load fee settings', 500);
+  }
+});
+
+// Super admin only: change them (audited).
+router.put('/fee-settings', authenticate, requireSuperAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const updates = {};
+    for (const key of ['member_service_fee', 'guest_service_fee']) {
+      if (body[key] === undefined) continue;
+      const n = Number(body[key]);
+      if (!Number.isFinite(n) || n < 0 || n > 100000) {
+        return errorResponse(res, `${key.replace(/_/g, ' ')} must be between ₦0 and ₦100,000 per ticket.`, 400);
+      }
+      updates[key] = money(n);
+    }
+    if (body.customer_bears_gateway_fee !== undefined) {
+      updates.customer_bears_gateway_fee = body.customer_bears_gateway_fee === true || body.customer_bears_gateway_fee === 'true';
+    }
+    if (!Object.keys(updates).length) return errorResponse(res, 'Nothing to update.', 400);
+
+    const before = await getFeeSettings({ fresh: true });
+    const { data, error } = await supabase
+      .from('fee_settings')
+      .upsert([{ id: 1, ...updates, updated_at: new Date().toISOString(), updated_by: req.userId }], { onConflict: 'id' })
+      .select()
+      .single();
+    if (error) throw error;
+    invalidateFeeSettings();
+
+    await auditLog({
+      action: 'fee_settings_updated',
+      userId: req.userId,
+      userEmail: req.user?.email,
+      details: {
+        target: 'Ticket fee settings',
+        outcome: 'success',
+        actor_type: 'admin',
+        before: {
+          member_service_fee: before.member_service_fee,
+          guest_service_fee: before.guest_service_fee,
+          customer_bears_gateway_fee: before.customer_bears_gateway_fee
+        },
+        after: updates
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    return successResponse(res, await getFeeSettings({ fresh: true }), 'Fee settings updated');
+  } catch (error) {
+    console.error('Fee settings update error:', error);
+    return errorResponse(res, 'Could not update fee settings', 500);
+  }
+});
+
+// ============================================
+// REVENUE REPORT (Admin)
+// ============================================
+// Confirmed ticket orders split into: tickets (NACOS), service fees, and the
+// Bachs processing fee buyers paid on top. Grouped by event and by month.
+router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { start_date, end_date } = req.query;
+    const PAGE = 1000;
+    const rows = [];
+    for (let from = 0; from < 50000; from += PAGE) {
+      let q = supabase
+        .from('payments')
+        .select('id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description')
+        .eq('status', 'verified')
+        .eq('payment_type', 'event_registration');
+      if (start_date) q = q.gte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(start_date) ? `${start_date}T00:00:00.000Z` : start_date);
+      if (end_date) q = q.lte('verified_at', /^\d{4}-\d{2}-\d{2}$/.test(end_date) ? `${end_date}T23:59:59.999Z` : end_date);
+      const { data, error } = await q.order('verified_at', { ascending: false }).range(from, from + PAGE - 1);
+      if (error) throw error;
+      rows.push(...(data || []));
+      if (!data || data.length < PAGE) break;
+    }
+
+    const eventIds = [...new Set(rows.map(r => r.event_id).filter(Boolean))];
+    const titles = {};
+    if (eventIds.length) {
+      const { data: evs } = await supabase.from('events').select('id, title, date').in('id', eventIds);
+      (evs || []).forEach(e => { titles[e.id] = { title: e.title, date: e.date }; });
+    }
+
+    const blank = () => ({ orders: 0, tickets: 0, ticket_revenue: 0, service_fees: 0, gateway_fees: 0, collected: 0, guest_orders: 0 });
+    const add = (bucket, r) => {
+      const subtotal = money(r.subtotal_amount ?? r.amount);
+      const fee = money(r.service_fee || 0);
+      bucket.orders += 1;
+      bucket.tickets += quantityOf(r);
+      bucket.ticket_revenue = money(bucket.ticket_revenue + subtotal);
+      bucket.service_fees = money(bucket.service_fees + fee);
+      bucket.gateway_fees = money(bucket.gateway_fees + money(r.gateway_fee || 0));
+      bucket.collected = money(bucket.collected + money(r.amount));
+      if (!r.user_id && r.guest_email) bucket.guest_orders += 1;
+    };
+
+    const totals = blank();
+    const byEvent = {};
+    const byMonth = {};
+    // Deleting an event unlinks its payments (event_id becomes null). The
+    // order description still says "Online payment for event: <title> (...)",
+    // so group those under their old title, marked as deleted.
+    const deletedTitleOf = (r) => {
+      const d = String(r.description || '');
+      const m = d.match(/^Online payment for event: (.+)$/);
+      if (!m) return null;
+      const rest = m[1].trim();
+      // Drop the trailing "(...)" order label, which can itself contain
+      // brackets, e.g. "(Fifa × 1, Ludo × 1 (2 plays))".
+      let cut = -1;
+      if (rest.endsWith(')')) {
+        let depth = 0;
+        for (let i = rest.length - 1; i >= 0; i--) {
+          if (rest[i] === ')') depth++;
+          else if (rest[i] === '(' && --depth === 0) { cut = i; break; }
+        }
+      }
+      return (cut > 0 ? rest.slice(0, cut) : rest).trim() || null;
+    };
+    for (const r of rows) {
+      add(totals, r);
+      let ek = r.event_id || 'none';
+      let title = titles[r.event_id]?.title;
+      if (!title) {
+        const old = deletedTitleOf(r);
+        if (old) { ek = `deleted:${old}`; title = `${old} (deleted event)`; }
+      }
+      byEvent[ek] = byEvent[ek] || { event_id: r.event_id, title: title || 'Unknown event (deleted)', date: titles[r.event_id]?.date || null, deleted: !titles[r.event_id], ...blank() };
+      add(byEvent[ek], r);
+      const mk = String(r.verified_at || r.submitted_at || '').slice(0, 7) || 'unknown';
+      byMonth[mk] = byMonth[mk] || { month: mk, ...blank() };
+      add(byMonth[mk], r);
+    }
+
+    return successResponse(res, {
+      totals,
+      by_event: Object.values(byEvent).sort((a, b) => b.collected - a.collected),
+      by_month: Object.values(byMonth).sort((a, b) => (a.month < b.month ? 1 : -1)),
+      gateway_fee_note: 'Bachs fees are shown when Bachs reports them on the payment. With "buyer pays processing fee" on, they were paid by buyers on top of the amounts above.'
+    }, 'Revenue report');
+  } catch (error) {
+    console.error('Revenue report error:', error);
+    return errorResponse(res, 'Could not build the revenue report', 500);
   }
 });
 
@@ -1371,7 +1848,10 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       'Payment Type',
       'Tickets',
       'Unit Price (NGN)',
+      'Tickets Subtotal (NGN)',
+      'Service Fee (NGN)',
       'Amount (NGN)',
+      'Bachs Fee (NGN)',
       'Status',
       'Gateway',
       'Ticket Number',
@@ -1392,7 +1872,9 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
       const purpose = eventInfo?.title || p.description || (p.payment_type === 'event_registration' ? 'Event Registration' : 'Payment');
       const amount = Number(p.amount) || 0;
       const tickets = p.payment_type === 'event_registration' ? quantityOf(p) : '';
-      const unitPrice = tickets ? Math.round((amount / tickets) * 100) / 100 : '';
+      const subtotal = money(p.subtotal_amount ?? amount);
+      const serviceFee = money(p.service_fee || 0);
+      const unitPrice = tickets ? money(subtotal / tickets) : '';
       const gateway = p.gateway || (p.transaction_id?.startsWith('bach_') ? 'Bachs' : 'Paystack');
       const dateSubmitted = p.submitted_at || p.created_at ? new Date(p.submitted_at || p.created_at).toISOString() : '';
       const verifiedAt = p.verified_at ? new Date(p.verified_at).toISOString() : '';
@@ -1408,7 +1890,10 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
         escapeCsv(p.payment_type || 'event_registration'),
         escapeCsv(tickets),
         escapeCsv(unitPrice),
+        escapeCsv(subtotal),
+        escapeCsv(serviceFee),
         escapeCsv(amount),
+        escapeCsv(p.gateway_fee != null ? money(p.gateway_fee) : ''),
         escapeCsv(p.status || 'verified'),
         escapeCsv(gateway),
         escapeCsv(p.ticket_number || (p.event_id && p.status === 'verified' ? ticketNumberFor(p.event_id, p.id) : '')),
@@ -1443,6 +1928,7 @@ router.get('/export/csv', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 router.get('/', authenticate, requireAdmin, async (req, res) => {
   try {
+    maybeMarkAbandonedCheckouts(); // tidy stale unpaid checkouts (at most hourly, never blocks)
     const { status, payment_type } = req.query;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
@@ -1693,6 +2179,98 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
 // ============================================
 // PAYMENT WEBHOOK LISTENER (Bachs & Paystack)
 // ============================================
+// ============================================
+// FETCH MISSING BACHS FEES (admin)
+// ============================================
+// Older orders were saved before the Bachs fee was read from the right place,
+// and Bachs only reports the fee once a payment settles. This asks Bachs again
+// for up to 40 paid online orders that have no fee recorded.
+router.post('/refresh-gateway-fees', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const bachsSecret = process.env.BACHS_SECRET_KEY;
+    if (!isBachsKeyConfigured(bachsSecret)) return errorResponse(res, 'Bachs is not configured on the server.', 503);
+    const baseUrl = bachsSecret.startsWith('sk_live_') ? 'https://api.bachs.io' : 'https://sandbox-api.bachs.io';
+
+    const { data: rows, error } = await supabase
+      .from('payments')
+      .select('id, transaction_id, notes')
+      .eq('status', 'verified')
+      .is('gateway_fee', null)
+      .not('transaction_id', 'is', null)
+      // Bachs references: checkout "chk_..." or charge "ch_...". (The
+      // "[online-checkout]" note is replaced when a payment is confirmed,
+      // so it can't be used to find paid orders.)
+      .ilike('transaction_id', 'ch%')
+      .order('verified_at', { ascending: false })
+      .limit(40);
+    if (error) throw error;
+
+    let updated = 0; let notFound = 0; let noFeeYet = 0;
+    for (const p of rows || []) {
+      const ref = String(p.transaction_id);
+      const url = ref.startsWith('chk_')
+        ? `${baseUrl}/v1/checkout-sessions/${encodeURIComponent(ref)}`
+        : `${baseUrl}/v1/payments/${encodeURIComponent(ref)}`;
+      try {
+        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${bachsSecret}`, 'Content-Type': 'application/json' } });
+        if (!resp.ok) { notFound += 1; continue; }
+        const j = await resp.json().catch(() => null);
+        const obj = (j && (j.data || j)) || {};
+        const fee = gatewayFeeOf(obj);
+        if (fee == null) { noFeeYet += 1; continue; }
+        const paidBy = gatewayFeePaidByOf(obj);
+        const { error: upErr } = await supabase
+          .from('payments')
+          .update({ gateway_fee: fee, ...(paidBy ? { gateway_fee_paid_by: paidBy } : {}) })
+          .eq('id', p.id)
+          .is('gateway_fee', null);
+        if (upErr) throw upErr;
+        updated += 1;
+      } catch (e) {
+        console.warn(`[Bachs] fee refresh failed for ${ref}:`, e.message);
+        notFound += 1;
+      }
+    }
+    if (updated) {
+      await auditLog({ action: 'gateway_fees_refreshed', userId: req.userId, details: { checked: (rows || []).length, updated }, ip: req.ip });
+    }
+    return successResponse(res, { checked: (rows || []).length, updated, no_fee_yet: noFeeYet, not_found: notFound },
+      `${updated} order(s) updated with their Bachs fee`);
+  } catch (error) {
+    console.error('[Bachs] refresh fees error:', error);
+    return errorResponse(res, 'Could not fetch Bachs fees', 500, error);
+  }
+});
+
+// ============================================
+// MARK ABANDONED CHECKOUTS
+// ============================================
+// Called daily by Vercel Cron (Authorization: Bearer CRON_SECRET), or by an
+// admin. Marks online checkouts still unpaid after 24h as "abandoned".
+const cronOrAdmin = (req, res, next) => {
+  const secret = process.env.CRON_SECRET;
+  const header = req.headers.authorization || '';
+  if (secret && header.length === `Bearer ${secret}`.length && safeEqual(header, `Bearer ${secret}`)) {
+    req.viaCron = true;
+    return next();
+  }
+  return authenticate(req, res, () => requireAdmin(req, res, next));
+};
+const runAbandonCleanup = async (req, res) => {
+  try {
+    const result = await markAbandonedCheckouts();
+    if (result.marked) {
+      await auditLog({ action: 'checkouts_marked_abandoned', userId: req.userId || null, details: { ...result, via: req.viaCron ? 'cron' : 'admin' }, ip: req.ip });
+    }
+    return successResponse(res, result, `${result.marked} unpaid checkout(s) marked abandoned`);
+  } catch (error) {
+    console.error('[checkouts] cleanup error:', error);
+    return errorResponse(res, 'Could not clean up abandoned checkouts', 500, error);
+  }
+};
+router.get('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
+router.post('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
+
 router.post('/webhook', async (req, res) => {
   const bachsSecret = process.env.BACHS_SECRET_KEY;
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
@@ -1743,17 +2321,35 @@ router.post('/webhook', async (req, res) => {
     // the gateway retries (settlement is idempotent).
     try {
       const bData = event.data || event;
-      const ref = bData.id || bData.checkout_id || bData.reference || bData.code;
-      const status = String(bData.status || bData.state || event.type || '').toLowerCase();
+      const eventType = String(event.type || event.event || '').toLowerCase();
+      const candidateIds = gatewayIdsOf(bData);
+      const paid = isGatewayPaid(bData) || /(completed|succeeded|success|paid)$/.test(eventType);
 
-      if (ref && (status.includes('completed') || status.includes('success') || status.includes('paid'))) {
-        const rawAmt = bData.pricing?.amount ?? bData.amount;
+      // Match on whichever identifier we recorded when the checkout started
+      // (the checkout ID), not just the event's own id (often the charge ID).
+      let ref = null;
+      if (candidateIds.length) {
+        const { data: matches, error: matchErr } = await supabase
+          .from('payments')
+          .select('transaction_id')
+          .in('transaction_id', candidateIds);
+        if (matchErr) throw matchErr;
+        const known = new Set((matches || []).map(m => m.transaction_id));
+        ref = candidateIds.find(id => known.has(id)) || candidateIds[0];
+      }
+      const chargeId = candidateIds.find(id => id !== ref) || null;
+
+      console.log(`[Bachs Webhook] type=${eventType || 'none'} status=${describeGatewayStatus(bData) || 'none'} paid=${paid} ids=${candidateIds.join(',')} matched=${ref || 'none'}`);
+
+      if (ref && paid) {
+        const rawAmt = bData.pricing?.amount ?? bData.amount_paid ?? bData.amount;
         const result = await settleWebhookPayment({
           reference: String(ref),
           amountNaira: parseFloat(rawAmt),
           currency: bData.pricing?.currency || bData.currency || 'NGN',
           customerEmail: bData.customer?.email || event.customer?.email || bData.metadata?.email,
-          source: 'Bachs webhook'
+          source: chargeId ? `Bachs webhook (gateway ref ${chargeId})` : 'Bachs webhook',
+          gatewayFee: gatewayFeeOf(bData)
         });
         console.log('[Bachs Webhook] Settled', ref, JSON.stringify(result));
       }
@@ -1823,7 +2419,7 @@ router.post('/webhook', async (req, res) => {
  * fallback. Underpaid payments are recorded as `pending` for admin review and
  * no ticket is issued.
  */
-async function settleWebhookPayment({ reference, amountNaira, currency, customerEmail, hintedEventId = null, hintedUserId = null, source }) {
+async function settleWebhookPayment({ reference, amountNaira, currency, customerEmail, hintedEventId = null, hintedUserId = null, source, gatewayFee = null }) {
   if (!reference || reference === 'undefined') throw new Error('Webhook payload has no reference');
 
   const { data: existing, error: existingErr } = await supabase
@@ -1854,19 +2450,35 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
   let targetEvent = null;
   let expected = null;
   let quantity = 1;
+  let priced = null; // { total_amount, subtotal_amount, service_fee }
   const eventId = existing?.event_id || hintedEventId || null;
   if (eventId) {
-    const payable = await loadPayableEvent(eventId, { guest: isGuestOrder });
+    // Game orders carry their game on the recorded checkout. A game-event
+    // payment with no recorded checkout can't be priced here, so it is left
+    // for admin review (no ticket) like any other unmatched payment.
+    const payable = await loadPayableEvent(eventId, { guest: isGuestOrder, lines: existing && existing.event_id === eventId ? linesFromRow(existing) : null, settling: true });
     if (!payable.error) {
       targetEvent = payable.event;
-      // Quantity comes from the server-recorded checkout. Without one, infer it
-      // from how many full tickets the confirmed amount covers.
-      if (existing && existing.event_id) {
+      if (existing && existing.event_id && money(existing.amount) > 0) {
+        // The server-recorded checkout is authoritative (quantity, tickets + service fee).
         quantity = quantityOf(existing);
-      } else if (Number.isFinite(amountNaira)) {
-        quantity = Math.min(MAX_TICKETS_PER_ORDER, Math.max(1, Math.floor((amountNaira + 0.01) / payable.price)));
+        priced = {
+          total_amount: money(existing.amount),
+          subtotal_amount: money(existing.subtotal_amount ?? existing.amount),
+          service_fee: money(existing.service_fee || 0)
+        };
+      } else {
+        // No recorded checkout: infer how many full tickets (price + service
+        // fee each) the confirmed amount covers, priced with current settings.
+        const feeSettings = await getFeeSettings();
+        const feePerTicket = serviceFeePerTicket(payable.event, feeSettings, { guest: isGuestOrder });
+        if (existing && existing.event_id) quantity = quantityOf(existing);
+        else if (Number.isFinite(amountNaira)) {
+          quantity = Math.min(MAX_TICKETS_PER_ORDER, Math.max(1, Math.floor((amountNaira + 0.01) / (payable.price + feePerTicket))));
+        }
+        priced = orderBreakdown({ unitPrice: payable.price, quantity, feePerTicket });
       }
-      expected = orderTotal(payable.price, quantity);
+      expected = priced.total_amount;
     }
   }
 
@@ -1877,6 +2489,14 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
     ? `${source}: UNDERPAID or unreadable amount (paid ${amountNaira} ${currency}, expected ${expected} NGN). Needs admin review; no ticket issued.`
     : `Verified via ${source}`;
 
+  // Store our breakdown (tickets + service fee) for paid-in-full event orders;
+  // the Bachs fee the buyer paid on top is recorded separately.
+  const recordedAmount = (priced && !underpaid) ? priced.total_amount : (Number.isFinite(amountNaira) ? amountNaira : 0);
+  const feeColumns = {
+    ...(priced ? { subtotal_amount: priced.subtotal_amount, service_fee: priced.service_fee } : {}),
+    ...(gatewayFee != null ? { gateway_fee: gatewayFee } : {})
+  };
+
   let payment = existing;
   if (!existing) {
     const { data: inserted, error: insErr } = await supabase
@@ -1884,7 +2504,8 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
       .insert([{
         user_id: userId,
         event_id: targetEvent ? targetEvent.id : null,
-        amount: Number.isFinite(amountNaira) ? amountNaira : 0,
+        amount: recordedAmount,
+        ...feeColumns,
         ticket_quantity: quantity,
         payment_type: targetEvent ? 'event_registration' : 'other',
         transaction_id: reference,
@@ -1906,7 +2527,8 @@ async function settleWebhookPayment({ reference, amountNaira, currency, customer
       .from('payments')
       .update({
         user_id: existing.user_id || userId,
-        amount: Number.isFinite(amountNaira) ? amountNaira : existing.amount,
+        amount: (priced && !underpaid) ? priced.total_amount : (Number.isFinite(amountNaira) ? amountNaira : existing.amount),
+        ...feeColumns,
         status: underpaid ? 'pending' : 'verified',
         verified_at: underpaid ? null : now,
         notes

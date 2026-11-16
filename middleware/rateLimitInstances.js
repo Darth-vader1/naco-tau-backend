@@ -13,9 +13,11 @@
 //   Phase 1 (module load) — create in-memory fallback instances so routes
 //     can import real middleware references immediately.
 //   Phase 2 (server.js, after Redis is ready) — call initRateLimiters(storeOrFactory)
-//     to replace every instance with a Redis-backed version. Because the
-//     exported object is mutated in place, all routes automatically use the
-//     upgraded limiters with zero re-import needed.
+//     to replace every instance with a Redis-backed version.
+//
+// Routes destructure these at require time (before Phase 2), so what they
+// get must never change identity. Each exported limiter is a small stable
+// wrapper that calls whichever real limiter is current on every request.
 //
 // USAGE in server.js:
 //   const { initRateLimiters } = require('./middleware/rateLimitInstances');
@@ -33,7 +35,7 @@ const {
 } = require('./rateLimit');
 
 // Phase 1: in-memory fallback instances (store = undefined)
-const instances = {
+const current = {
   authLimiter:          createAuthLimiter(),
   registrationLimiter:  createRegistrationLimiter(),
   votingLimiter:        createVotingLimiter(),
@@ -43,6 +45,33 @@ const instances = {
   profileViewLimiter:   createProfileViewLimiter(),
   profileUpdateLimiter: createProfileUpdateLimiter(),
 };
+
+// Stable middleware that routes hold on to; always uses the live limiter.
+const instances = {};
+for (const name of Object.keys(current)) {
+  instances[name] = function delegatingLimiter(req, res, next) {
+    return current[name](req, res, next);
+  };
+}
+
+// Route-defined limiters: name -> (store|undefined) => middleware.
+const extraFactories = new Map();
+let storeFactory = null; // set by initRateLimiters
+
+/**
+ * For limiters a route defines itself. `makeLimiter(store)` must build the
+ * limiter with that store (undefined = memory). Returns stable middleware
+ * that switches to the Redis-backed version once initRateLimiters runs.
+ */
+function registerLimiter(name, makeLimiter) {
+  if (current[name]) throw new Error(`Rate limiter "${name}" already registered`);
+  extraFactories.set(name, makeLimiter);
+  current[name] = makeLimiter(storeFactory ? storeFactory(name) : undefined);
+  instances[name] = function delegatingLimiter(req, res, next) {
+    return current[name](req, res, next);
+  };
+  return instances[name];
+}
 
 /**
  * Phase 2 — called by server.js once the Redis store is ready.
@@ -57,15 +86,17 @@ function initRateLimiters(storeOrFactory) {
   }
   const getStore = typeof storeOrFactory === 'function' ? storeOrFactory : () => storeOrFactory;
 
-  instances.authLimiter          = createAuthLimiter(getStore('auth'));
-  instances.registrationLimiter  = createRegistrationLimiter(getStore('reg'));
-  instances.votingLimiter        = createVotingLimiter(getStore('vote'));
-  instances.uploadLimiter        = createUploadLimiter(getStore('upload'));
-  instances.apiLimiter           = createApiLimiter(getStore('api'));
-  instances.directoryLimiter     = createDirectoryLimiter(getStore('dir'));
-  instances.profileViewLimiter   = createProfileViewLimiter(getStore('pview'));
-  instances.profileUpdateLimiter = createProfileUpdateLimiter(getStore('pupdate'));
+  current.authLimiter          = createAuthLimiter(getStore('auth'));
+  current.registrationLimiter  = createRegistrationLimiter(getStore('reg'));
+  current.votingLimiter        = createVotingLimiter(getStore('vote'));
+  current.uploadLimiter        = createUploadLimiter(getStore('upload'));
+  current.apiLimiter           = createApiLimiter(getStore('api'));
+  current.directoryLimiter     = createDirectoryLimiter(getStore('dir'));
+  current.profileViewLimiter   = createProfileViewLimiter(getStore('pview'));
+  current.profileUpdateLimiter = createProfileUpdateLimiter(getStore('pupdate'));
+  for (const [name, make] of extraFactories) current[name] = make(getStore(name));
+  storeFactory = getStore;
   console.log('✅ Rate limiting: all limiters upgraded to Redis-backed store');
 }
 
-module.exports = { instances, initRateLimiters };
+module.exports = { instances, initRateLimiters, registerLimiter, _current: current };
