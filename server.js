@@ -62,6 +62,7 @@ const adminRoutes = require('./routes/admin');
 const hackathonRoutes = require('./routes/hackathons');
 const gameMarshalRoutes = require('./routes/gameMarshals');
 const pastExecutiveRoutes = require('./routes/pastExecutives');
+const siteContentRoutes = require('./routes/siteContent');
 const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
@@ -322,6 +323,7 @@ app.use('/api/payments', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [
 app.use('/api/hackathons', hackathonRoutes);
 app.use('/api/game-marshals', gameMarshalRoutes);
 app.use('/api/past-executives', pastExecutiveRoutes);
+app.use('/api/site-content', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], siteContentRoutes);
 const emailRoutes = require('./routes/email');
 app.use('/api/emails', process.env.ENABLE_CSRF === 'true' ? csrfProtection : [], emailRoutes); // CSRF on emails
 // Storage admin routes (service_role backed, admin only)
