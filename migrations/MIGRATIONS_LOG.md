@@ -54,6 +54,7 @@
 | 026 | `026_game_marshals.sql` | `game_marshals` (appointed per event, start/end time), `game_plays` (plays marked used), `redeem_game_play()` (locks the ticket so plays can't go below zero) | ✅ Applied 15 Nov 2026 |
 | 027 | `027_homepage_cms.sql` | `executives` (current executive team cards) and `site_settings` (single-row homepage copy, dues/bank info, inquiry contacts) for the Homepage CMS | ✅ Applied 16 Nov 2026 (tables present) |
 | 028 | `028_realtime_site_updates.sql` | Switch on Supabase Realtime for `events`, `past_questions`, `timetables` (site "new content" pop-ups); existing RLS still applies | ✅ Applied 16 Nov 2026 |
+| 029 | `029_payment_archive.sql` | `archived_at`, `archived_by`, `archive_reason` on `payments` (soft delete, e.g. test payments; left out of revenue and stats) | ✅ Applied 16 Nov 2026 |
 
 ---
 
