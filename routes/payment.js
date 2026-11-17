@@ -733,7 +733,40 @@ router.get('/receipt/:reference', async (req, res) => {
       ('NACOS-' + (payment.event_id ? payment.event_id.substring(0, 4).toUpperCase() : 'PAY') +
        '-' + payment.id.substring(0, 6).toUpperCase());
 
-    // Public-safe payload: ticket status and event info only — no student PII
+    // Attendee details for the receipt card (both registered students and guests).
+    // Only receipt display fields are included — never phone numbers or internal user_id.
+    const isGuest = !payment.user_id && !!(payment.guest_email || payment.guest_name || registration?.guest_email || registration?.guest_name);
+    let student = null;
+    let guest = null;
+    if (isGuest) {
+      const guestName = payment.guest_name || registration?.guest_name || 'Guest Attendee';
+      const guestEmail = payment.guest_email || registration?.guest_email || null;
+      guest = { name: guestName, email: guestEmail };
+      student = {
+        name: guestName,
+        email: guestEmail,
+        matric_no: 'Guest (Non-Member)',
+        department: 'Guest Ticket',
+        is_guest: true
+      };
+    } else if (payment.user_id) {
+      const { data: studentRow } = await supabase
+        .from('students')
+        .select('name, first_name, last_name, email, matric_no, department')
+        .eq('user_id', payment.user_id)
+        .maybeSingle();
+      if (studentRow) {
+        const fullName = studentRow.name || `${studentRow.first_name || ''} ${studentRow.last_name || ''}`.trim() || null;
+        student = {
+          name: fullName,
+          email: studentRow.email || null,
+          matric_no: studentRow.matric_no || null,
+          department: studentRow.department || null,
+          is_guest: false
+        };
+      }
+    }
+
     const ticketQuantity = quantityOf(registration || payment);
     const publicPayload = {
       ticket_number: ticketNumber,
@@ -749,8 +782,10 @@ router.get('/receipt/:reference', async (req, res) => {
       verified_at: payment.verified_at,
       submitted_at: payment.submitted_at,
       event,
-      // Ticket status only: no buyer name, email, phone or account id, since
-      // anyone holding the receipt link can open this.
+      is_guest: isGuest,
+      student,
+      guest,
+      // Ticket status only: no phone or account id.
       registration: registration ? {
         status: registration.status,
         ticket_quantity: registration.ticket_quantity,
@@ -758,18 +793,11 @@ router.get('/receipt/:reference', async (req, res) => {
       } : null
     };
 
-    // Owners additionally receive their own student details
+    // Authenticated owners also receive the full payment row
     if (isOwner) {
-      const { data: student } = await supabase
-        .from('students')
-        .select('name, email, matric_no, department')
-        .eq('user_id', payment.user_id)
-        .maybeSingle();
-
       return successResponse(res, {
         ...publicPayload,
-        payment,   // full payment row for the owner
-        student    // PII only for the owner
+        payment
       }, 'Receipt retrieved successfully');
     }
 
