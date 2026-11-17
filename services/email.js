@@ -12,7 +12,9 @@ const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_PORT = process.env.SMTP_PORT || 465;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
-const EMAIL_FROM = process.env.EMAIL_FROM || 'nacos@tau.edu.ng';
+const RAW_EMAIL_FROM = (process.env.EMAIL_FROM || 'nacos@tau.edu.ng').trim();
+const EMAIL_FROM_MATCH = RAW_EMAIL_FROM.match(/<([^>]+)>/);
+const EMAIL_FROM = (EMAIL_FROM_MATCH ? EMAIL_FROM_MATCH[1] : RAW_EMAIL_FROM).replace(/^["']|["']$/g, '').trim();
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'https://nacosportal.vercel.app').replace(/\/$/, '');
 
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID;
@@ -78,9 +80,10 @@ async function sendEmail({ to, bcc, subject, html, text }) {
     try {
         mailOptions = {
             from: `NACOS TAU <${EMAIL_FROM}>`,
+            replyTo: process.env.ADMIN_EMAIL || EMAIL_FROM,
             subject: subject,
             html: html,
-            text: text || (html ? html.replace(/<[^>]*>/g, '') : ''),
+            text: text || (html ? html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : ''),
         };
 
         if (bcc) {
@@ -1251,7 +1254,7 @@ async function sendPaymentAdminNotificationEmail({ student, event, payment, tick
 
         return await sendEmail({
             to: recipients,
-            subject: `💰 Payment Received: ${amountStr} from ${studentName} (${eventTitle})`,
+            subject: `Payment Confirmation: ${amountStr} from ${studentName} (${eventTitle})`,
             html,
             text: `New Payment Received!\nAmount: ${amountStr}\nStudent: ${studentName} (${student?.matric_no || 'N/A'})\nEvent: ${eventTitle}\nTickets: ${qty}\nRef: ${refStr}\nTicket: ${ticketNumber || 'N/A'}\nTime: ${dateStr}\n\nNACOS TAU Portal`
         });
