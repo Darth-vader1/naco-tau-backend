@@ -2225,8 +2225,9 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
     if (payment_type) query = query.eq('payment_type', payment_type);
 
     const { data, error, count } = await query
-      .range(offset, offset + limit - 1)
-      .order('submitted_at', { ascending: false });
+      .order('submitted_at', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + limit - 1);
 
     if (error) throw error;
 
