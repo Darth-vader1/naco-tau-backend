@@ -552,6 +552,15 @@ const check = (name, cond, extra) => { console.log((cond ? 'PASS ' : 'FAIL ') + 
   r = await call('/bachs-session', 'u4', { event_id: 'evt-fees-10', quantity: 1 });
   check('fees: fee 0 means ticket price only', r.status === 200 && gateway.lastCreate.pricing.amount === '100.00', r.body.data);
 
+  // ---------------- Manual spot reservation (complimentary & cash) ----------------
+  r = await call('/manual-reserve', 'admin1', { event_id: 'evt-fees-10', attendee_type: 'guest', guest_name: 'VIP Speaker', guest_email: 'vip@domain.org', quantity: 2, reservation_mode: 'complimentary', notes: 'Keynote speaker' });
+  check('manual-reserve: complimentary ₦0 guest reservation issues 2 tickets', r.status === 201 && r.body.data.amount === 0 && r.body.data.ticket_quantity === 2 && /^RSV-/.test(r.body.data.reference) && /^NACOS-/.test(r.body.data.ticket_number), r.body);
+  r = await call('/receipt/' + encodeURIComponent(r.body.data.reference), 'nobody', null, 'GET');
+  check('manual-reserve: receipt shows guest name and email for reserved ticket', r.status === 200 && r.body.data.student && r.body.data.student.name === 'VIP Speaker' && r.body.data.student.email === 'vip@domain.org', r.body.data);
+
+  r = await call('/manual-reserve', 'admin1', { event_id: 'evt-aaaa-1', attendee_type: 'student', student_identifier: 'u6@st.tau.edu.ng', quantity: 1, reservation_mode: 'cash', amount_paid: 100, notes: 'Paid cash at desk' });
+  check('manual-reserve: cash student reservation records ₦100 and issues ticket', r.status === 201 && r.body.data.amount === 100 && r.body.data.attendee.email === 'u6@st.tau.edu.ng', r.body);
+
   server.close();
   console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
   process.exitCode = fails ? 1 : 0; setTimeout(() => process.exit(process.exitCode), 200);

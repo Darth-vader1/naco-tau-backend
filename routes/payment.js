@@ -1406,6 +1406,196 @@ router.post('/:id/gateway-recheck', authenticate, requireAdmin, async (req, res)
   }
 });
 
+// ============================================
+// ADMIN: MANUALLY RESERVE SPOT / ISSUE TICKET
+// ============================================
+// Allows an admin to reserve 1..MAX_TICKETS_PER_ORDER spots for either a
+// registered student or an external guest, as either:
+//   - "complimentary" (₦0 VIP / speaker / executive reservation), or
+//   - "cash" (offline cash / direct transfer collected by the admin).
+// Creates a verified payment + registration, syncs seat counts, and emails
+// the official QR ticket & receipt link.
+router.post('/manual-reserve', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const eventId = typeof body.event_id === 'string' ? body.event_id.trim() : '';
+    if (!eventId) return errorResponse(res, 'event_id is required', 400);
+
+    const quantity = parseTicketQuantity(body.quantity);
+    if (!quantity) {
+      return errorResponse(res, `You can reserve between 1 and ${MAX_TICKETS_PER_ORDER} tickets at a time.`, 400);
+    }
+
+    const { data: event, error: evErr } = await supabase.from('events').select('*').eq('id', eventId).maybeSingle();
+    if (evErr) throw evErr;
+    if (!event) return errorResponse(res, 'Event not found.', 404);
+
+    const mode = String(body.reservation_mode || 'complimentary').toLowerCase() === 'cash' ? 'cash' : 'complimentary';
+    const attendeeType = String(body.attendee_type || (body.guest_email || body.guest_name ? 'guest' : 'student')).toLowerCase();
+    const bypassCapacity = body.bypass_capacity === true || body.bypass_capacity === "true";
+    const cleanNote = typeof body.notes === 'string' ? body.notes.replace(/[\r\n]+/g, ' ').trim().slice(0, 200) : '';
+
+    if (!bypassCapacity) {
+      const remaining = await seatsRemaining(event);
+      if (quantity > remaining) {
+        return errorResponse(res, remaining === 0
+          ? `Event is at full capacity (${event.max_attendees} tickets issued). Enable "Allow over-capacity" if you still want to issue this ticket.`
+          : `Only ${remaining} seat(s) left for this event. Reduce quantity or enable "Allow over-capacity".`, 409);
+      }
+    }
+
+    let userId = null;
+    let studentRow = null;
+    let guestName = null;
+    let guestEmail = null;
+    let guestPhone = null;
+
+    if (attendeeType === 'guest') {
+      const gName = typeof body.guest_name === 'string' ? body.guest_name.replace(/[\r\n]+/g, ' ').trim().replace(/\s+/g, ' ') : '';
+      const gEmail = typeof body.guest_email === 'string' ? body.guest_email.replace(/[\r\n]+/g, '').trim().toLowerCase() : '';
+      const gPhone = typeof body.guest_phone === 'string' ? body.guest_phone.replace(/[\r\n]+/g, '').trim() : '';
+      if (gName.length < 2 || gName.length > 100) {
+        return errorResponse(res, 'Please enter the guest full name (2–100 characters).', 400);
+      }
+      if (!GUEST_EMAIL_RE.test(gEmail) || gEmail.length > 254) {
+        return errorResponse(res, 'Please enter a valid guest email address.', 400);
+      }
+      if (gPhone && !GUEST_PHONE_RE.test(gPhone)) {
+        return errorResponse(res, 'Please enter a valid guest phone number (or leave it blank).', 400);
+      }
+      guestName = gName;
+      guestEmail = gEmail;
+      guestPhone = gPhone || null;
+    } else {
+      const rawUserId = typeof body.user_id === 'string' ? body.user_id.trim() : '';
+      const identifier = typeof body.student_identifier === 'string' ? body.student_identifier.trim() : '';
+      if (rawUserId) {
+        const { data: s } = await supabase.from('students').select('*').eq('user_id', rawUserId).maybeSingle();
+        studentRow = s || null;
+      }
+      if (!studentRow && identifier) {
+        const norm = identifier.toLowerCase();
+        const { data: allMatching } = await supabase.from('students').select('*');
+        studentRow = (allMatching || []).find(s =>
+          (s.user_id && String(s.user_id).toLowerCase() === norm) ||
+          (s.matric_no && String(s.matric_no).trim().toLowerCase() === norm) ||
+          (s.email && String(s.email).trim().toLowerCase() === norm)
+        ) || null;
+      }
+      if (!studentRow || !studentRow.user_id) {
+        return errorResponse(res, 'Student not found. Select a registered student or enter a valid Matric No / student email.', 404);
+      }
+      userId = studentRow.user_id;
+    }
+
+    // Determine amount recorded on the payment
+    let finalAmount = 0;
+    if (mode === 'cash') {
+      const defaultUnit = attendeeType === "guest"
+        ? (Number(event.public_price) || Number(event.payment_amount) || 0)
+        : (Number(event.payment_amount) || 0);
+      const rawAmount = body.amount_paid !== undefined && body.amount_paid !== null && body.amount_paid !== ""
+        ? Number(body.amount_paid)
+        : orderTotal(defaultUnit, quantity);
+      if (!Number.isFinite(rawAmount) || rawAmount < 0 || rawAmount > 10000000) {
+        return errorResponse(res, 'Enter a valid cash/offline amount (₦0 – ₦10,000,000).', 400);
+      }
+      finalAmount = money(rawAmount);
+    }
+
+    const dateTag = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const randTag = crypto.randomBytes(3).toString("hex").toUpperCase();
+    const reference = `RSV-${dateTag}-${randTag}`;
+    const nowIso = new Date().toISOString();
+    const modeLabel = mode === "complimentary" ? "Reserved Spot (Complimentary)" : "Manual Reservation (Cash / Offline Paid)";
+    const noteText = cleanNote ? `${modeLabel} — ${cleanNote}` : modeLabel;
+
+    const { data: createdPayment, error: payErr } = await supabase
+      .from('payments')
+      .insert([{
+        user_id: userId,
+        guest_name: guestName,
+        guest_email: guestEmail,
+        guest_phone: guestPhone,
+        event_id: event.id,
+        payment_type: 'event_registration',
+        transaction_id: reference,
+        payment_proof_url: receiptUrlFor(reference),
+        ticket_quantity: quantity,
+        amount: finalAmount,
+        subtotal_amount: finalAmount,
+        service_fee: 0,
+        gateway_fee: 0,
+        status: 'verified',
+        verified_by: req.userId,
+        verified_at: nowIso,
+        submitted_at: nowIso,
+        description: `${mode === "complimentary" ? "Complimentary reservation" : "Manual offline ticket"} for event: ${event.title} (${quantity} ticket${quantity > 1 ? "s" : ""})`,
+        notes: noteText
+      }])
+      .select()
+      .single();
+
+    if (payErr) throw payErr;
+
+    // Pass allow_repeat_orders: true so an admin can always issue an extra reservation if needed
+    const { registration, ticketNumber, newlyIssued } = await issueEventTicket({
+      payment: createdPayment,
+      event: { ...event, allow_repeat_orders: true }
+    });
+
+    const attendeeName = studentRow
+      ? (studentRow.name || `${studentRow.first_name || ''} ${studentRow.last_name || ''}`.trim() || 'Student')
+      : guestName;
+    const attendeeEmail = studentRow ? studentRow.email : guestEmail;
+
+    await auditLog({
+      action: 'manual_ticket_reserved',
+      userId: req.userId,
+      userEmail: req.user?.email,
+      details: {
+        target: `${event.title} — ${attendeeName}`,
+        outcome: 'success',
+        actor_type: 'admin',
+        event_id: event.id,
+        payment_id: createdPayment.id,
+        reference,
+        ticket_number: ticketNumber,
+        ticket_quantity: quantity,
+        reservation_mode: mode,
+        amount: finalAmount,
+        attendee_type: attendeeType,
+        attendee_name: attendeeName,
+        attendee_email: attendeeEmail,
+        notes: cleanNote || null
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    return successResponse(res, {
+      payment: createdPayment,
+      registration,
+      ticket_number: ticketNumber,
+      ticket_quantity: quantity,
+      reference,
+      reservation_mode: mode,
+      amount: finalAmount,
+      receipt_url: receiptUrlFor(reference),
+      newly_issued: newlyIssued,
+      attendee: {
+        type: attendeeType,
+        name: attendeeName,
+        email: attendeeEmail,
+        matric_no: studentRow?.matric_no || (attendeeType === "guest" ? "Guest (Non-Member)" : null)
+      }
+    }, `Spot reserved! Ticket ${ticketNumber} issued for ${attendeeName}.`, 201);
+  } catch (err) {
+    console.error('Manual ticket reservation error:', err);
+    return errorResponse(res, 'Could not reserve spot: ' + (err.message || 'server error'), 500);
+  }
+});
+
 router.post('/guest-session', guestLimiter, async (req, res) => {
   try {
     const { event_id } = req.body || {};

@@ -62,7 +62,7 @@ const AUDIT_NOISE = [
 // Actions already written explicitly by route handlers (avoid duplicate rows).
 const EXPLICITLY_AUDITED = [
     { method: 'POST', path: /^\/api\/auth\/(register|login|admin\/login|logout|forgot-password)$/ },
-    { method: 'POST', path: /^\/api\/payments\/(submit|verify-paystack|guest-verify|[^/]+\/recheck|[^/]+\/gateway-recheck|webhook)$/ },
+    { method: 'POST', path: /^\/api\/payments\/(submit|verify-paystack|guest-verify|manual-reserve|[^/]+\/recheck|[^/]+\/gateway-recheck|webhook)$/ },
     { method: 'PUT', path: /^\/api\/payments\/[^/]+\/verify$/ }
 ];
 
