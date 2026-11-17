@@ -88,6 +88,8 @@ const server = app.listen(0);
 const base = `http://127.0.0.1:${server.address().port}/p`;
 const realFetch = nativeFetch;
 async function call(p, user, body, method = 'POST', headers = {}) {
+  // Checkout now requires a phone number; send one unless the test sets its own.
+  if (p === '/bachs-session' && body && typeof body === 'object' && !Array.isArray(body) && !('phone' in body)) body = { phone: '08012345678', ...body };
   const r = await realFetch(base + p, { method, headers: Object.assign({ 'content-type': 'application/json', 'x-user': user }, headers), body: method === 'GET' ? undefined : JSON.stringify(body) });
   const txt = await r.text(); let b; try { b = JSON.parse(txt); } catch { b = txt; }
   return { status: r.status, body: b };

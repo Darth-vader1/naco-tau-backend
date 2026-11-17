@@ -196,6 +196,7 @@ router.put('/:id/items', authenticate, requireAdmin, async (req, res) => {
     const existingIds = new Set(existing.map(i => i.id));
     const now = new Date().toISOString();
     const keptIds = new Set();
+    let tournamentColumn = null; // false once we learn migration 032 isn't run
 
     for (const it of parsed.items) {
       const row = {
@@ -208,16 +209,28 @@ router.put('/:id/items', authenticate, requireAdmin, async (req, res) => {
         is_active: it.is_active,
         updated_at: now
       };
+      if (it.tournament || tournamentColumn !== false) row.tournament = !!it.tournament;
+      const noTournamentCol = (error) => error && /tournament/.test(error.message || '') && /column|schema cache/i.test(error.message || '');
       if (it.id && existingIds.has(it.id)) {
-        const { error } = await supabase.from('event_items').update(row).eq('id', it.id).eq('event_id', id);
+        let { error } = await supabase.from('event_items').update(row).eq('id', it.id).eq('event_id', id);
+        if (noTournamentCol(error)) {
+          if (it.tournament) return errorResponse(res, 'Tournament games need database migration 032. Run it in Supabase, then save again.', 409);
+          tournamentColumn = false; delete row.tournament;
+          ({ error } = await supabase.from('event_items').update(row).eq('id', it.id).eq('event_id', id));
+        }
         if (error) throw error;
         keptIds.add(it.id);
       } else {
-        const { data: created, error } = await supabase
+        let { data: created, error } = await supabase
           .from('event_items')
           .insert([{ ...row, event_id: id }])
           .select('id')
           .single();
+        if (noTournamentCol(error)) {
+          if (it.tournament) return errorResponse(res, 'Tournament games need database migration 032. Run it in Supabase, then save again.', 409);
+          tournamentColumn = false; delete row.tournament;
+          ({ data: created, error } = await supabase.from('event_items').insert([{ ...row, event_id: id }]).select('id').single());
+        }
         if (error) throw error;
         keptIds.add(created.id);
       }

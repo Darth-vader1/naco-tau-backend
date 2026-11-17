@@ -18,6 +18,7 @@
     "@sentry/node": "^7.120.4",
     "@sentry/profiling-node": "^7.120.4",
     "@supabase/supabase-js": "^2.110.8",
+    "@vercel/functions": "3.10.5",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",

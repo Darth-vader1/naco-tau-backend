@@ -316,6 +316,40 @@ async function sendBulkEmail({ subject, html, text, targetFilter = null }) {
         let successCount = 0;
         let errorCount = 0;
 
+        // Record the broadcast before sending, then update it after every batch,
+        // so Email Analytics shows it (with live counts) even if the run is cut short.
+        let notificationId = null;
+        try {
+            const { data: row, error: insErr } = await supabase
+                .from('notifications')
+                .insert({
+                    type: 'bulk_email',
+                    subject,
+                    recipient_count: students.length,
+                    target_filter: targetFilter || 'all',
+                    success_count: 0,
+                    error_count: 0,
+                    details: 'sending',
+                    created_at: new Date().toISOString()
+                })
+                .select('id')
+                .single();
+            if (insErr) console.error('❌ Could not record broadcast start:', insErr.message);
+            else notificationId = row && row.id;
+        } catch (e) {
+            console.error('❌ Could not record broadcast start:', e.message);
+        }
+        const saveProgress = async (status) => {
+            if (!notificationId) return;
+            try {
+                await supabase.from('notifications')
+                    .update({ success_count: successCount, error_count: errorCount, details: status })
+                    .eq('id', notificationId);
+            } catch (e) {
+                console.error('❌ Could not update broadcast progress:', e.message);
+            }
+        };
+
         for (let i = 0; i < batches.length; i++) {
             const batch = batches[i];
             try {
@@ -344,17 +378,22 @@ async function sendBulkEmail({ subject, html, text, targetFilter = null }) {
                 console.error(`❌ Batch ${i + 1} threw an error:`, error);
                 errorCount += batch.length;
             }
+            if (i < batches.length - 1) await saveProgress('sending');
         }
 
-        // Log notification to database
-        await logNotification({
-            type: 'bulk_email',
-            subject,
-            recipient_count: students.length,
-            target_filter: targetFilter || 'all',
-            success_count: successCount,
-            error_count: errorCount
-        });
+        if (notificationId) {
+            await saveProgress(errorCount > 0 ? `complete with ${errorCount} failed` : 'complete');
+        } else {
+            // Start record failed: fall back to a single summary row
+            await logNotification({
+                type: 'bulk_email',
+                subject,
+                recipient_count: students.length,
+                target_filter: targetFilter || 'all',
+                success_count: successCount,
+                error_count: errorCount
+            });
+        }
 
         console.log(`✅ Email campaign complete: ${successCount} sent, ${errorCount} failed`);
 

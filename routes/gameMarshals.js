@@ -97,9 +97,11 @@ async function ticketGames(registration) {
     .select('item_id, plays')
     .eq('registration_id', registration.id);
   if (error) throw error;
+  const entries = Array.isArray(registration.entry_details) ? registration.entry_details : [];
   return lines.map(l => {
     const usedPlays = (used || []).filter(u => u.item_id === l.item_id).reduce((s, u) => s + (u.plays || 0), 0);
-    return { item_id: l.item_id, name: l.name, bought: l.plays, used: usedPlays, left: Math.max(0, l.plays - usedPlays) };
+    const entry = entries.find(e => e && e.item_id === l.item_id);
+    return { item_id: l.item_id, name: l.name, bought: l.plays, used: usedPlays, left: Math.max(0, l.plays - usedPlays), ...(entry ? { username: entry.username } : {}) };
   });
 }
 
@@ -352,7 +354,8 @@ router.get('/admin/event/:eventId', authenticate, requireAdmin, async (req, res)
     const userIds = [...new Set(regs.map(r => r.user_id).filter(Boolean))];
     let students = [];
     if (userIds.length) {
-      const { data, error } = await supabase.from('students').select('user_id, name, first_name, last_name, email, matric_no').in('user_id', userIds);
+      let { data, error } = await supabase.from('students').select('user_id, name, first_name, last_name, email, matric_no, phone').in('user_id', userIds);
+      if (error && /phone/.test(error.message || '')) ({ data, error } = await supabase.from('students').select('user_id, name, first_name, last_name, email, matric_no').in('user_id', userIds));
       if (error) throw error;
       students = data || [];
     }
@@ -365,13 +368,15 @@ router.get('/admin/event/:eventId', authenticate, requireAdmin, async (req, res)
         name: r.guest_name || displayName(s) || 'Student',
         email: r.guest_email || s?.email || '',
         matric_no: s?.matric_no || '',
+        phone: r.guest_phone || s?.phone || '',
         guest: !!r.guest_email,
         bought_at: r.registration_date || r.created_at || null,
         tickets: quantityOf(r),
         admitted: checkinRows.filter(c => c.registration_id === r.id).reduce((a, c) => a + c.admitted, 0),
         games: lines.map(l => {
           const used = plays.filter(p => p.registration_id === r.id && p.item_id === l.item_id).reduce((a, p) => a + p.plays, 0);
-          return { name: l.name || nameOf(l.item_id), bought: l.plays, used, left: Math.max(0, l.plays - used) };
+          const entry = (Array.isArray(r.entry_details) ? r.entry_details : []).find(e => e && e.item_id === l.item_id);
+          return { name: l.name || nameOf(l.item_id), bought: l.plays, used, left: Math.max(0, l.plays - used), ...(entry ? { username: entry.username } : {}) };
         })
       };
     });
