@@ -1,5 +1,6 @@
 // backend/services/email.js
 const nodemailer = require('nodemailer');
+const QRCode = require('qrcode');
 const { supabase } = require('../config/supabase');
 const { formatPrizePool: formatPrizeText } = require('../utils/prizeFormat');
 const { recordEmailSend } = require('../utils/emailUsage');
@@ -75,7 +76,7 @@ async function getGmailAccessToken() {
     return data.access_token;
 }
 
-async function sendEmail({ to, bcc, subject, html, text }) {
+async function sendEmail({ to, bcc, subject, html, text, attachments }) {
     let mailOptions = null;
     try {
         mailOptions = {
@@ -85,6 +86,7 @@ async function sendEmail({ to, bcc, subject, html, text }) {
             html: html,
             text: text || (html ? html.replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : ''),
         };
+        if (Array.isArray(attachments) && attachments.length) mailOptions.attachments = attachments;
 
         if (bcc) {
             mailOptions.to = EMAIL_FROM;
@@ -1015,19 +1017,38 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
             { label: 'Payment Reference', value: `<code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">${refStr}</code>` }
         ];
 
-        const ticketNotice = gameLines ? `
+        // The QR code goes inside the email as an inline image (cid:), so guests
+        // can show it at the door straight from their inbox, even offline.
+        let qrAttachment = null;
+        if (ticketNumber && /^NACOS-/i.test(String(ticketNumber))) {
+            try {
+                const png = await QRCode.toBuffer(String(ticketNumber), { type: 'png', errorCorrectionLevel: 'M', margin: 2, width: 360, color: { dark: '#000000', light: '#ffffff' } });
+                qrAttachment = { filename: `${ticketNumber}.png`, content: png, contentType: 'image/png', cid: 'ticket-qr@nacos' };
+            } catch (qrErr) {
+                console.error('[sendEventTicketEmail] QR generation failed:', qrErr.message);
+            }
+        }
+        const qrBlock = qrAttachment ? `
+            <div style="text-align: center; margin: 18px 0 6px;">
+                <img src="cid:ticket-qr@nacos" width="220" height="220" alt="QR code for ticket ${ticketNumber}" style="display: inline-block; width: 220px; height: 220px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px; background: #ffffff;">
+                <p style="margin: 8px 0 0; font-size: 13px; color: #334155;">Show this QR code ${gameLines ? 'at the game area' : 'at the entrance'}<br><strong style="letter-spacing: 1px;">${ticketNumber}</strong></p>
+            </div>
+        ` : '';
+        const showWhat = qrAttachment ? 'show the QR code above' : 'tap <strong>Open My QR Ticket</strong> below and show the QR code';
+
+        const ticketNotice = qrBlock + (gameLines ? `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
-                    🎮 <strong>How to play:</strong> tap <strong>Open My QR Ticket</strong> below and show the QR code (or your ticket number <strong>${ticketNumber}</strong>) at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
+                    🎮 <strong>How to play:</strong> ${showWhat} (or your ticket number <strong>${ticketNumber}</strong>) at the game area. It covers <strong>${playsStr}</strong>: ${escEmail(gameLines.text)}.
                 </p>
             </div>
         ` : `
             <div style="background: #f0fdf4; border: 1px dashed #22c55e; border-radius: 8px; padding: 14px; margin: 18px 0; text-align: center;">
                 <p style="margin: 0; font-size: 13px; color: #166534;">
-                    🎟️ <strong>Admission Notice:</strong> tap <strong>Open My QR Ticket</strong> below and show the QR code (or your ticket number <strong>${ticketNumber}</strong>) at the entrance. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
+                    🎟️ <strong>Admission Notice:</strong> ${showWhat} (or your ticket number <strong>${ticketNumber}</strong>) at the entrance. This ticket <strong>${admitStr.toLowerCase()}</strong>${qty > 1 ? ' entering together' : ''}.
                 </p>
             </div>
-        `;
+        `);
 
         const html = renderBaseLayout({
             headerBadge: 'Payment Verified & Confirmed',
@@ -1045,6 +1066,7 @@ async function sendEventTicketEmail({ student, event, ticketNumber, payment, gam
             to: student.email,
             subject: `🎟️ Ticket Confirmed: ${eventTitle} — NACOS TAU`,
             html,
+            ...(qrAttachment ? { attachments: [qrAttachment] } : {}),
             text: `Hi ${studentName},\n\nYour registration and payment for "${eventTitle}" have been verified!\nTicket Number: ${ticketNumber}\n${gameLines ? `Games: ${gameLines.text}\nTotal plays: ${qty}` : `Tickets: ${qty} (${admitStr})`}\nDate: ${dateStr}\nTime: ${timeStr}\nVenue: ${locationStr}${feeText}\nTotal Paid: ${amountStr}${serviceFeeNum > 0 ? '' : unitStr}\nPayment Ref: ${refStr}\n\nShow this ticket number at the venue entrance.\n\nNACOS TAU Chapter`
         });
 
