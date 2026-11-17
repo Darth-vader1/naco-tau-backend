@@ -305,16 +305,18 @@ async function issueEventTicket({ payment, event }) {
         const { data: student } = await supabase.from('students').select('*').eq('user_id', userId).maybeSingle();
         recipient = student;
       }
+      const emailPromises = [];
       if (recipient && recipient.email) {
-        await sendEventTicketEmail({ student: recipient, event: emailEvent, ticketNumber, payment, games: gameLines });
+        emailPromises.push(sendEventTicketEmail({ student: recipient, event: emailEvent, ticketNumber, payment, games: gameLines }));
       }
-      await sendPaymentAdminNotificationEmail({
+      const adminEmailPromise = sendPaymentAdminNotificationEmail({
         student: recipient || { name: 'Student', email: '' },
         event: emailEvent,
         payment,
         ticketNumber,
         games: gameLines
       });
+      await Promise.allSettled([...emailPromises, adminEmailPromise]);
       if (!isGuest) {
         try {
           await supabase.from('payment_verification').insert([{

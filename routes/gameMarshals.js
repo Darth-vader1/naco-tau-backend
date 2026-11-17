@@ -18,7 +18,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
 const { auditLog } = require('../middleware/audit');
 const { registerLimiter } = require('../middleware/rateLimitInstances');
-const { ticketNumberFor, parseTicketNumber } = require('../utils/tickets');
+const { ticketNumberFor, parseTicketNumber, quantityOf } = require('../utils/tickets');
 const { isUuid, loadEventItems, linesFromRow, describeGameOrder, playsOfItemIn } = require('../utils/games');
 const { sendGameMarshalInviteEmail } = require('../services/email');
 
@@ -114,14 +114,53 @@ async function buyerName(registration) {
   return { name: displayName(data) || 'Student', guest: false };
 }
 
-async function ticketView(eventId, registration) {
-  const [games, buyer] = await Promise.all([ticketGames(registration), buyerName(registration)]);
+const isMissingCheckins = (error) => !!error && (error.code === 'PGRST205' || error.code === '42P01' || error.code === 'PGRST202' ||
+  /event_checkins|admit_tickets/.test(error.message || '') && /does not exist|could not find/i.test(error.message || ''));
+
+/** Game events are run by marshals marking plays; other events by door check-in. */
+async function eventMode(eventId) {
+  const items = await loadEventItems(eventId);
+  return items.length ? 'games' : 'checkin';
+}
+
+/** People let in on a ticket so far (and when). Migration 031. */
+async function admissionsOf(registration) {
+  const { data, error } = await supabase
+    .from('event_checkins')
+    .select('admitted, created_at')
+    .eq('registration_id', registration.id);
+  if (error) {
+    if (isMissingCheckins(error)) return { available: false, admitted: 0, times: [] };
+    throw error;
+  }
+  const rows = data || [];
   return {
+    available: true,
+    admitted: rows.reduce((s, r) => s + (r.admitted || 0), 0),
+    times: rows.flatMap(r => Array(Math.max(1, r.admitted || 1)).fill(r.created_at)).sort()
+  };
+}
+
+async function ticketView(eventId, registration, mode) {
+  const m = mode || await eventMode(eventId);
+  const [games, buyer, adm] = await Promise.all([
+    m === 'games' ? ticketGames(registration) : Promise.resolve(null),
+    buyerName(registration),
+    admissionsOf(registration)
+  ]);
+  const tickets = quantityOf(registration);
+  return {
+    mode: m,
     ticket_number: ticketNumberFor(eventId, registration.linked_payment_id),
     buyer: buyer.name,
     is_guest: buyer.guest,
     games: games || [],
-    plays_left: (games || []).reduce((s, g) => s + g.left, 0)
+    plays_left: (games || []).reduce((s, g) => s + g.left, 0),
+    tickets,
+    admitted: adm.admitted,
+    admit_left: Math.max(0, tickets - adm.admitted),
+    admitted_at: adm.times,
+    checkin_available: adm.available
   };
 }
 
@@ -151,13 +190,16 @@ router.get('/me', authenticate, async (req, res) => {
       if (evErr) throw evErr;
       events = evs || [];
     }
+    const modes = {};
+    for (const id of [...new Set(rows.map(r => r.event_id))]) modes[id] = await eventMode(id);
     return successResponse(res, rows.map(r => ({
       id: r.id,
       starts_at: r.starts_at,
       ends_at: r.ends_at,
       active: r.starts_at <= now,
+      mode: modes[r.event_id] || 'checkin',
       event: events.find(e => e.id === r.event_id) || { id: r.event_id, title: 'Event' }
-    })), 'Your game marshal appointments');
+    })), 'Your event duty appointments');
   } catch (error) {
     console.error('[marshals] me error:', error);
     return errorResponse(res, 'Could not load your marshal appointments', 500, error);
@@ -171,7 +213,7 @@ router.get('/:eventId/ticket', authenticate, marshalLimiter, async (req, res) =>
     const found = await findTicket(req.params.eventId, req.query.code);
     if (found.error) return errorResponse(res, found.error, found.status);
     const view = await ticketView(req.params.eventId, found.registration);
-    if (!view.games.length) return errorResponse(res, 'This ticket has no games on it.', 404);
+    if (view.mode === 'games' && !view.games.length) return errorResponse(res, 'This ticket has no games on it.', 404);
     return successResponse(res, view, 'Ticket found');
   } catch (error) {
     console.error('[marshals] ticket lookup error:', error);
@@ -223,6 +265,52 @@ router.post('/:eventId/redeem', authenticate, marshalLimiter, async (req, res) =
   }
 });
 
+// Door check-in: let in `count` people on a ticket ("all" = everyone left).
+router.post('/:eventId/admit', authenticate, marshalLimiter, async (req, res) => {
+  try {
+    const appt = await requireMarshal(req, res);
+    if (!appt) return;
+    const found = await findTicket(req.params.eventId, req.body?.code);
+    if (found.error) return errorResponse(res, found.error, found.status);
+    const reg = found.registration;
+    const bought = quantityOf(reg);
+    const adm = await admissionsOf(reg);
+    if (!adm.available) return errorResponse(res, 'Check-in needs database migration 031 first.', 409);
+    const left = Math.max(0, bought - adm.admitted);
+    if (left === 0) return errorResponse(res, 'Everyone on this ticket is already in.', 409);
+    const count = req.body?.count === 'all' ? left : Number(req.body?.count === undefined ? 1 : req.body.count);
+    if (!Number.isInteger(count) || count < 1 || count > 50) return errorResponse(res, 'Admit between 1 and 50 people at a time.', 400);
+    if (count > left) return errorResponse(res, `Only ${left} more ${left === 1 ? 'person' : 'people'} can come in on this ticket.`, 409);
+
+    const { data: remaining, error } = await supabase.rpc('admit_tickets', {
+      p_registration_id: reg.id,
+      p_count: count,
+      p_bought: bought,
+      p_marshal_id: appt.id,
+      p_marshal_user_id: req.userId
+    });
+    if (error) {
+      if (/ALREADY_ADMITTED/.test(error.message || '')) return errorResponse(res, 'Someone else just admitted people on this ticket. Look it up again.', 409);
+      if (/TICKET_NOT_FOUND/.test(error.message || '')) return errorResponse(res, 'Ticket not found.', 404);
+      if (isMissingCheckins(error)) return errorResponse(res, 'Check-in needs database migration 031 first.', 409);
+      throw error;
+    }
+
+    await auditLog({
+      action: 'event_checkin',
+      userId: req.userId,
+      details: { event_id: req.params.eventId, registration_id: reg.id, admitted: count, left: remaining },
+      ip: req.ip
+    });
+
+    const view = await ticketView(req.params.eventId, reg);
+    return successResponse(res, view, `${count} ${count === 1 ? 'person' : 'people'} admitted`);
+  } catch (error) {
+    console.error('[marshals] admit error:', error);
+    return errorResponse(res, 'Could not check that ticket in', 500, error);
+  }
+});
+
 // ============================================
 // ADMIN
 // ============================================
@@ -233,20 +321,24 @@ router.get('/admin/event/:eventId', authenticate, requireAdmin, async (req, res)
     if (!isUuid(eventId)) return errorResponse(res, 'Invalid event', 400);
     const now = nowIso();
 
-    const [marshalsRes, itemsAll, regsRes, playsRes] = await Promise.all([
+    const [marshalsRes, itemsAll, regsRes, playsRes, checkinsRes] = await Promise.all([
       supabase.from('game_marshals').select('*').eq('event_id', eventId).order('starts_at', { ascending: false }),
       loadEventItems(eventId, { activeOnly: false }),
       supabase.from('event_registrations').select('*').eq('event_id', eventId).not('linked_payment_id', 'is', null),
-      supabase.from('game_plays').select('registration_id, item_id, plays, marshal_user_id, created_at').eq('event_id', eventId)
+      supabase.from('game_plays').select('registration_id, item_id, plays, marshal_user_id, created_at').eq('event_id', eventId),
+      supabase.from('event_checkins').select('registration_id, admitted, created_at').eq('event_id', eventId)
     ]);
     for (const r of [marshalsRes, regsRes, playsRes]) if (r.error) throw r.error;
+    if (checkinsRes.error && !isMissingCheckins(checkinsRes.error)) throw checkinsRes.error;
+    const checkinRows = checkinsRes.error ? [] : (checkinsRes.data || []);
+    const mode = itemsAll.some(i => i.is_active !== false) ? 'games' : 'checkin';
 
     const marshals = (marshalsRes.data || []).map(m => ({
       id: m.id, email: m.email, name: m.name, starts_at: m.starts_at, ends_at: m.ends_at,
       status: m.revoked_at ? 'removed' : (m.ends_at <= now ? 'ended' : (m.starts_at > now ? 'upcoming' : 'active'))
     }));
 
-    const regs = (regsRes.data || []).filter(r => (r.status || 'registered') !== 'cancelled' && linesFromRow(r));
+    const regs = (regsRes.data || []).filter(r => (r.status || 'registered') !== 'cancelled' && (mode === 'checkin' || linesFromRow(r)));
     const plays = playsRes.data || [];
 
     // Plays sold vs played, per game
@@ -275,6 +367,8 @@ router.get('/admin/event/:eventId', authenticate, requireAdmin, async (req, res)
         matric_no: s?.matric_no || '',
         guest: !!r.guest_email,
         bought_at: r.registration_date || r.created_at || null,
+        tickets: quantityOf(r),
+        admitted: checkinRows.filter(c => c.registration_id === r.id).reduce((a, c) => a + c.admitted, 0),
         games: lines.map(l => {
           const used = plays.filter(p => p.registration_id === r.id && p.item_id === l.item_id).reduce((a, p) => a + p.plays, 0);
           return { name: l.name || nameOf(l.item_id), bought: l.plays, used, left: Math.max(0, l.plays - used) };
@@ -282,7 +376,15 @@ router.get('/admin/event/:eventId', authenticate, requireAdmin, async (req, res)
       };
     });
 
-    return successResponse(res, { marshals, games, buyers }, 'Game marshals and plays');
+    const ticketsSold = regs.reduce((s, r) => s + quantityOf(r), 0);
+    const checkedIn = checkinRows.reduce((s, c) => s + (c.admitted || 0), 0);
+    return successResponse(res, {
+      mode,
+      marshals,
+      games,
+      buyers,
+      checkins: { available: !checkinsRes.error, tickets_sold: ticketsSold, checked_in: checkedIn, not_yet: Math.max(0, ticketsSold - checkedIn) }
+    }, 'Event duty and attendance');
   } catch (error) {
     console.error('[marshals] admin report error:', error);
     return errorResponse(res, 'Could not load game marshals', 500, error);
@@ -303,11 +405,14 @@ router.post('/admin/event/:eventId', authenticate, requireAdmin, async (req, res
     if (endsAt <= new Date()) return errorResponse(res, 'The end time is already in the past.', 400);
     if (endsAt - startsAt > MAX_APPOINTMENT_DAYS * 86400000) return errorResponse(res, `An appointment can last at most ${MAX_APPOINTMENT_DAYS} days.`, 400);
 
-    const { data: event, error: evErr } = await supabase.from('events').select('id, title, date, time, location').eq('id', eventId).maybeSingle();
+    const { data: event, error: evErr } = await supabase.from('events').select('id, title, date, time, location, requires_payment').eq('id', eventId).maybeSingle();
     if (evErr) throw evErr;
     if (!event) return errorResponse(res, 'Event not found', 404);
     const items = await loadEventItems(eventId);
-    if (!items.length) return errorResponse(res, 'Add games to this event first (green controller button).', 400);
+    const mode = items.length ? 'games' : 'checkin';
+    if (mode === 'checkin' && !event.requires_payment) {
+      return errorResponse(res, 'Check-in works with paid tickets (they have ticket numbers and QR codes). This event is free.', 400);
+    }
 
     // Exact email match, case-insensitive (escape LIKE wildcards).
     const pattern = email.replace(/[\\%_]/g, c => '\\' + c);
@@ -350,7 +455,7 @@ router.post('/admin/event/:eventId', authenticate, requireAdmin, async (req, res
     let emailed = false;
     try {
       const r = await Promise.race([
-        sendGameMarshalInviteEmail({ student, event, startsAt: saved.starts_at, endsAt: saved.ends_at }),
+        sendGameMarshalInviteEmail({ student, event, startsAt: saved.starts_at, endsAt: saved.ends_at, mode }),
         new Promise(resolve => setTimeout(() => resolve({ success: false, error: 'timeout' }), 8000))
       ]);
       emailed = !!(r && r.success !== false);
