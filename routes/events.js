@@ -160,6 +160,37 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// Admin: every registration for an event (free and paid), with the student's
+// details. Browsers can only read their own registrations (RLS), so the admin
+// Attendees window needs this to see free sign-ups.
+router.get('/:id/registrations', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+    const { data: regs, error } = await supabase
+      .from('event_registrations')
+      .select('*')
+      .eq('event_id', id)
+      .order('registration_date', { ascending: false });
+    if (error) throw error;
+    const userIds = [...new Set((regs || []).map(r => r.user_id).filter(Boolean))];
+    let students = [];
+    if (userIds.length) {
+      let res2 = await supabase.from('students').select('user_id, name, email, matric_no, department, phone').in('user_id', userIds);
+      if (res2.error && /phone/.test(res2.error.message || '')) {
+        res2 = await supabase.from('students').select('user_id, name, email, matric_no, department').in('user_id', userIds);
+      }
+      if (res2.error) throw res2.error;
+      students = res2.data || [];
+    }
+    const byUser = Object.fromEntries(students.map(s => [s.user_id, s]));
+    return successResponse(res, (regs || []).map(r => ({ ...r, students: byUser[r.user_id] || null })));
+  } catch (error) {
+    console.error('Event registrations fetch error:', error);
+    return errorResponse(res, 'Failed to fetch registrations', 500, error);
+  }
+});
+
 // ============================================
 // GAMES (pay per play) FOR AN EVENT
 // ============================================
