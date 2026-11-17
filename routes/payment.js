@@ -1908,7 +1908,7 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
     for (let from = 0; from < 50000; from += PAGE) {
       let q = supabase
         .from('payments')
-        .select(`id, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description${hasArchive ? ', archived_at, archive_reason' : ''}`)
+        .select(`id, transaction_id, notes, event_id, amount, subtotal_amount, service_fee, gateway_fee, ticket_quantity, verified_at, submitted_at, user_id, guest_email, description${hasArchive ? ', archived_at, archive_reason' : ''}`)
         .eq('status', 'verified')
         .eq('payment_type', 'event_registration');
       // Archived (test) orders never count; they're only listed when asked for.
@@ -1928,16 +1928,59 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
       (evs || []).forEach(e => { titles[e.id] = { title: e.title, date: e.date }; });
     }
 
-    const blank = () => ({ orders: 0, tickets: 0, ticket_revenue: 0, service_fees: 0, gateway_fees: 0, collected: 0, guest_orders: 0 });
+    const isOfflineRow = (r) => {
+      const ref = String(r.transaction_id || '');
+      const notes = String(r.notes || '');
+      const desc = String(r.description || '');
+      if (ref.startsWith('RSV-')) return true;
+      if (/Manual Reservation|Reserved Spot|Complimentary reservation|Manual offline ticket/i.test(notes + " " + desc)) return true;
+      if (/^chk_|^ch_|^ps_/i.test(ref)) return false;
+      if (/Bachs|Paystack|online checkout|^Online payment for event:/i.test(notes + " " + desc)) return false;
+      return !isOnlineCheckoutRow(r);
+    };
+    const blank = () => ({
+      orders: 0,
+      tickets: 0,
+      ticket_revenue: 0,
+      online_ticket_revenue: 0,
+      offline_ticket_revenue: 0,
+      online_orders: 0,
+      offline_orders: 0,
+      complimentary_orders: 0,
+      complimentary_tickets: 0,
+      service_fees: 0,
+      gateway_fees: 0,
+      collected: 0,
+      online_collected: 0,
+      offline_collected: 0,
+      guest_orders: 0
+    });
     const add = (bucket, r) => {
       const subtotal = money(r.subtotal_amount ?? r.amount);
       const fee = money(r.service_fee || 0);
+      const amt = money(r.amount);
+      const qty = quantityOf(r);
+      const offline = isOfflineRow(r);
       bucket.orders += 1;
-      bucket.tickets += quantityOf(r);
+      bucket.tickets += qty;
       bucket.ticket_revenue = money(bucket.ticket_revenue + subtotal);
       bucket.service_fees = money(bucket.service_fees + fee);
       bucket.gateway_fees = money(bucket.gateway_fees + money(r.gateway_fee || 0));
-      bucket.collected = money(bucket.collected + money(r.amount));
+      bucket.collected = money(bucket.collected + amt);
+      if (offline) {
+        if (amt === 0 && subtotal === 0) {
+          bucket.complimentary_orders += 1;
+          bucket.complimentary_tickets += qty;
+        } else {
+          bucket.offline_orders += 1;
+          bucket.offline_ticket_revenue = money(bucket.offline_ticket_revenue + subtotal);
+          bucket.offline_collected = money(bucket.offline_collected + amt);
+        }
+      } else {
+        bucket.online_orders += 1;
+        bucket.online_ticket_revenue = money(bucket.online_ticket_revenue + subtotal);
+        bucket.online_collected = money(bucket.online_collected + amt);
+      }
       if (!r.user_id && r.guest_email) bucket.guest_orders += 1;
     };
 
@@ -1949,7 +1992,7 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
     // so group those under their old title, marked as deleted.
     const deletedTitleOf = (r) => {
       const d = String(r.description || '');
-      const m = d.match(/^Online payment for event: (.+)$/);
+      const m = d.match(/^(?:Online payment|Complimentary reservation|Manual offline ticket) for event: (.+)$/);
       if (!m) return null;
       const rest = m[1].trim();
       // Drop the trailing "(...)" order label, which can itself contain

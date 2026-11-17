@@ -561,6 +561,9 @@ const check = (name, cond, extra) => { console.log((cond ? 'PASS ' : 'FAIL ') + 
   r = await call('/manual-reserve', 'admin1', { event_id: 'evt-aaaa-1', attendee_type: 'student', student_identifier: 'u6@st.tau.edu.ng', quantity: 1, reservation_mode: 'cash', amount_paid: 100, notes: 'Paid cash at desk' });
   check('manual-reserve: cash student reservation records ₦100 and issues ticket', r.status === 201 && r.body.data.amount === 100 && r.body.data.attendee.email === 'u6@st.tau.edu.ng', r.body);
 
+  r = await call('/revenue', 'admin1', null, 'GET');
+  check('revenue: separates online gateway (400), offline cash (100), complimentary tickets (2), and total ticket revenue (500)', r.status === 200 && r.body.data.totals.online_ticket_revenue === 400 && r.body.data.totals.offline_ticket_revenue === 100 && r.body.data.totals.ticket_revenue === 500 && r.body.data.totals.complimentary_tickets === 2 && r.body.data.totals.collected === 700, r.body.data.totals);
+
   server.close();
   console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
   process.exitCode = fails ? 1 : 0; setTimeout(() => process.exit(process.exitCode), 200);
