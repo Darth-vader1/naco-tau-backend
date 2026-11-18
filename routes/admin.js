@@ -139,6 +139,56 @@ function validateBodyIsObject(req, res, next) {
 // ============================================
 
 /**
+ * GET /api/admin/:table
+ * Read all rows from an allowed admin table using service_role (bypasses RLS
+ * so inactive/draft rows remain visible to admins).
+ */
+router.get('/:table', async (req, res) => {
+  try {
+    const orderCol = typeof req.query.order === "string" && COLUMN_NAME_RE.test(req.query.order)
+      ? req.query.order
+      : (req.adminTable === "events" ? "date" : "created_at");
+    const ascending = req.query.ascending === "true" || req.query.ascending === "1";
+    let { data, error } = await supabase
+      .from(req.adminTable)
+      .select('*')
+      .order(orderCol, { ascending });
+    if (error && /column .* does not exist/i.test(error.message || "")) {
+      ({ data, error } = await supabase.from(req.adminTable).select("*"));
+    }
+    if (error) {
+      return res.status(error.status || 500).json({ error: `Fetch ${req.adminTable} failed: ${sanitizeDbErr(error)}` });
+    }
+    return res.json({ success: true, data: data || [], count: (data || []).length });
+  } catch (err) {
+    console.error(`[admin/GET ${req.adminTable}] exception:`, err);
+    return res.status(500).json({ error: `Unexpected error reading ${req.adminTable}.` });
+  }
+});
+
+/**
+ * GET /api/admin/:table/:id
+ * Read a single row by id using service_role (bypasses RLS).
+ */
+router.get('/:table/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from(req.adminTable)
+      .select('*')
+      .eq('id', req.adminId)
+      .maybeSingle();
+    if (error) {
+      return res.status(error.status || 500).json({ error: `Fetch ${req.adminTable}/${req.adminId} failed: ${sanitizeDbErr(error)}` });
+    }
+    if (!data) return res.status(404).json({ error: "Record not found." });
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error(`[admin/GET ${req.adminTable}/${req.adminId}] exception:`, err);
+    return res.status(500).json({ error: `Unexpected error reading ${req.adminTable}.` });
+  }
+});
+
+/**
  * POST /api/admin/:table
  * Insert a single row. Body = { ...column values }
  * Returns: { success, data: insertedRow, count }
