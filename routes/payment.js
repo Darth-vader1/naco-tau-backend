@@ -38,8 +38,28 @@ const {
   priceGameLines,
   gameBreakdown,
   gameColumns,
-  describeGameOrder
+  describeGameOrder,
+  parseBuyerPhone,
+  parseEntryUsernames,
+  tournamentError,
+  gamesAvailability,
+  isMissingColumn
 } = require('../utils/games');
+
+// Columns added by migration 032. Until it is run, rows are saved without them.
+const NEW_ORDER_COLUMNS = ['buyer_phone', 'entry_details'];
+const missingNewColumn = (error) => !!error && NEW_ORDER_COLUMNS.some(c => isMissingColumn(error, c));
+const withoutNewColumns = (row) => { const r = { ...row }; NEW_ORDER_COLUMNS.forEach(c => delete r[c]); return r; };
+
+/** Insert a payment row; if migration 032 isn't run yet, retry without its columns. */
+async function insertOrderRow(row, select = 'id') {
+  let res = await supabase.from('payments').insert([row]).select(select).maybeSingle();
+  if (missingNewColumn(res.error)) {
+    console.warn('[payments] migration 032 not run: saving order without phone/usernames');
+    res = await supabase.from('payments').insert([withoutNewColumns(row)]).select(select).maybeSingle();
+  }
+  return res;
+}
 
 // ============================================
 // PAYMENT SAFETY HELPERS
@@ -258,7 +278,7 @@ async function issueEventTicket({ payment, event }) {
     }
   }
 
-  const { data: registration, error: regErr } = await supabase
+  const { data: firstReg, error: firstRegErr } = await supabase
     .from('event_registrations')
     .insert([{
       event_id: event.id,
@@ -270,10 +290,31 @@ async function issueEventTicket({ payment, event }) {
       status: 'registered',
       linked_payment_id: payment.id,
       ticket_quantity: quantityOf(payment),
-      ...(gameLines ? gameColumns(gameLines) : {})
+      ...(gameLines ? gameColumns(gameLines) : {}),
+      ...(Array.isArray(payment.entry_details) && payment.entry_details.length ? { entry_details: payment.entry_details } : {})
     }])
     .select()
     .single();
+  let registration = firstReg;
+  let regErr = firstRegErr;
+  if (regErr && isMissingColumn(regErr, 'entry_details')) {
+    ({ data: registration, error: regErr } = await supabase
+      .from('event_registrations')
+      .insert([{
+        event_id: event.id,
+        user_id: userId,
+        guest_name: isGuest ? payment.guest_name : null,
+        guest_email: isGuest ? payment.guest_email : null,
+        guest_phone: isGuest ? payment.guest_phone : null,
+        registration_date: new Date().toISOString(),
+        status: 'registered',
+        linked_payment_id: payment.id,
+        ticket_quantity: quantityOf(payment),
+        ...(gameLines ? gameColumns(gameLines) : {})
+      }])
+      .select()
+      .single());
+  }
 
   if (regErr) {
     // Another request (verify / re-check / webhook) issued this order first.
@@ -400,6 +441,19 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     const capErr = await gameCapacityError(game);
     if (capErr) return errorResponse(res, capErr, 409);
 
+    // Every buyer gives a phone number; tournament games also need a player
+    // username and allow 1 entry per person.
+    const phoneCheck = parseBuyerPhone(req.body.phone);
+    if (phoneCheck.error) return errorResponse(res, phoneCheck.error, 400);
+    const entryCheck = parseEntryUsernames(req.body, game);
+    if (entryCheck.error) return errorResponse(res, entryCheck.error, 400);
+    const tourErr = await tournamentError(game, { userId: req.userId });
+    if (tourErr) return errorResponse(res, tourErr, 409);
+    // Save the number on the student's profile if they don't have one yet.
+    supabase.from('students').update({ phone: phoneCheck.phone })
+      .eq('user_id', req.userId).or('phone.is.null,phone.eq.')
+      .then(() => {}, () => {});
+
     const bachsSecret = process.env.BACHS_SECRET_KEY;
 
     if (!isBachsKeyConfigured(bachsSecret)) {
@@ -477,9 +531,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     // during the gateway redirect. Non-fatal: checkout still proceeds if this fails.
     let paymentId = null;
     if (checkoutId) {
-      const { data: intent, error: intentErr } = await supabase
-        .from('payments')
-        .insert([{
+      const { data: intent, error: intentErr } = await insertOrderRow({
           user_id: req.userId,
           event_id: payable.event.id,
           amount: price,
@@ -487,6 +539,8 @@ router.post('/bachs-session', authenticate, async (req, res) => {
           service_fee: breakdown.service_fee,
           ticket_quantity: quantity,
           ...(game ? gameColumns(game.lines) : {}),
+          buyer_phone: phoneCheck.phone,
+          ...(entryCheck.entries ? { entry_details: entryCheck.entries } : {}),
           payment_type: 'event_registration',
           transaction_id: String(checkoutId),
           payment_proof_url: receiptUrlFor(String(checkoutId)),
@@ -494,9 +548,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
           status: 'pending',
           submitted_at: new Date().toISOString(),
           notes: `${ONLINE_CHECKOUT_MARKER} Checkout started; awaiting gateway confirmation.`
-        }])
-        .select('id')
-        .maybeSingle();
+        });
       if (intentErr) {
         console.error('[Bachs] Could not record checkout intent:', intentErr.message);
       } else {
@@ -1596,6 +1648,20 @@ router.post('/manual-reserve', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// PUBLIC: which games of an event are fully booked (true/false only, no counts)
+router.get('/games-availability/:eventId', async (req, res) => {
+  try {
+    const eventId = String(req.params.eventId || '');
+    if (!/^[0-9a-f-]{36}$/i.test(eventId)) return errorResponse(res, 'Invalid event', 400);
+    const data = await gamesAvailability(eventId);
+    res.set('Cache-Control', 'public, max-age=30');
+    return successResponse(res, data);
+  } catch (err) {
+    console.error('Games availability error:', err);
+    return errorResponse(res, 'Could not check availability', 500);
+  }
+});
+
 router.post('/guest-session', guestLimiter, async (req, res) => {
   try {
     const { event_id } = req.body || {};
@@ -1627,6 +1693,10 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
     }
     const capErr = await gameCapacityError(game);
     if (capErr) return errorResponse(res, capErr, 409);
+    const entryCheck = parseEntryUsernames(req.body, game);
+    if (entryCheck.error) return errorResponse(res, entryCheck.error, 400);
+    const tourErr = await tournamentError(game, { guestEmail: guest.email });
+    if (tourErr) return errorResponse(res, tourErr, 409);
 
     const unitPrice = payable.price;
     const feeSettings = await getFeeSettings();
@@ -1691,19 +1761,19 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
 
     // The order record is REQUIRED for guests: it is what ties the payment to
     // the guest's email, quantity and price.
-    const { data: intent, error: intentErr } = await supabase
-      .from('payments')
-      .insert([{
+    const { data: intent, error: intentErr } = await insertOrderRow({
         user_id: null,
         guest_name: guest.name,
         guest_email: guest.email,
         guest_phone: guest.phone,
+        buyer_phone: guest.phone,
         event_id: payable.event.id,
         amount: total,
         subtotal_amount: breakdown.subtotal_amount,
         service_fee: breakdown.service_fee,
         ticket_quantity: quantity,
         ...(game ? gameColumns(game.lines) : {}),
+        ...(entryCheck.entries ? { entry_details: entryCheck.entries } : {}),
         payment_type: 'event_registration',
         transaction_id: String(checkoutId),
         payment_proof_url: receiptUrlFor(String(checkoutId)),
@@ -1711,11 +1781,9 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
         status: 'pending',
         submitted_at: new Date().toISOString(),
         notes: `${ONLINE_CHECKOUT_MARKER} [guest] Checkout started; awaiting gateway confirmation.`
-      }])
-      .select('id')
-      .single();
-    if (intentErr) {
-      console.error('[Guest] Could not record guest checkout:', intentErr.message);
+      });
+    if (intentErr || !intent) {
+      console.error('[Guest] Could not record guest checkout:', intentErr && intentErr.message);
       return errorResponse(res, 'Could not start checkout. Please try again.', 500);
     }
 
@@ -2225,8 +2293,9 @@ router.get('/', authenticate, requireAdmin, async (req, res) => {
     if (payment_type) query = query.eq('payment_type', payment_type);
 
     const { data, error, count } = await query
-      .range(offset, offset + limit - 1)
-      .order('submitted_at', { ascending: false });
+      .order('submitted_at', { ascending: false, nullsFirst: false })
+      .order('id', { ascending: true })
+      .range(offset, offset + limit - 1);
 
     if (error) throw error;
 

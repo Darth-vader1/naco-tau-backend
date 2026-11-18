@@ -7,6 +7,7 @@ const { errorResponse, successResponse } = require('../utils/helpers');
 const { getEmailUsage } = require('../utils/emailUsage');
 const { sendBulkEmail, getEmailTemplate, getActiveStudents, sendProfileUpdateReminderEmail, checkAndSendProfileReminders } = require('../services/email');
 const { instances: { apiLimiter: broadcastLimiter } } = require('../middleware/rateLimitInstances');
+const { waitUntil } = require('@vercel/functions');
 
 function calculateNextCronRun() {
     const cronDays = [1, 3, 5]; // Mon, Wed, Fri
@@ -104,6 +105,7 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
         const successCount = n.success_count || 0;
         const totalTarget = n.recipient_count || 0;
         const isFailed = (n.error_count > 0 && successCount === 0);
+        const isSending = n.details === 'sending';
 
         const cleanAudience = formatTargetAudience(n.target_filter);
 
@@ -118,7 +120,7 @@ async function getUnifiedEmailEvents({ startDateIso = null } = {}) {
             targetAudience: cleanAudience,
             sentCount: successCount,
             errorCount: n.error_count || 0,
-            status: isFailed ? 'failed' : 'delivered',
+            status: isSending ? 'sending' : isFailed ? 'failed' : 'delivered',
             timestamp: n.created_at,
             source: 'notification',
             details: `Target: ${cleanAudience}`
@@ -684,8 +686,10 @@ router.post('/broadcast', authenticate, requireAdmin, broadcastLimiter, async (r
         // Generate HTML from template
         const html = getEmailTemplate(type, templateData);
         
-        // Start bulk email job in background
-        sendBulkEmail({
+        // Send in the background, but tell Vercel to keep the function alive
+        // until every batch is out (otherwise it freezes after the response
+        // and later batches, plus the analytics record, never happen).
+        const job = sendBulkEmail({
             subject,
             html,
             text: message || templateData.description || subject,
@@ -710,6 +714,7 @@ router.post('/broadcast', authenticate, requireAdmin, broadcastLimiter, async (r
                     details: { subject, type, targetFilter: targetFilter || 'all', error: err.message }
                 });
             });
+        try { waitUntil(job); } catch (_) { /* not on Vercel: the promise just runs */ }
 
         return successResponse(res, 'Broadcast initiated successfully. Emails are being sent in the background.', {
             subject,

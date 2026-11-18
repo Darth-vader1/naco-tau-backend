@@ -247,6 +247,7 @@ function parseItemsInput(raw) {
       price: Math.round(price * 100) / 100,
       public_price: publicPrice === null ? null : Math.round(publicPrice * 100) / 100,
       max_plays: maxPlays,
+      tournament: it.tournament === true || it.tournament === 'true',
       sort_order: i,
       is_active: it.is_active !== false
     });
@@ -254,7 +255,102 @@ function parseItemsInput(raw) {
   return { items };
 }
 
+// ---------------------------------------------------------------------------
+// Tournaments (e.g. eFootball Mobile): 1 entry per person + player username
+// ---------------------------------------------------------------------------
+const PHONE_RE = /^\+?[0-9][0-9 ()-]{6,19}$/;
+const USERNAME_MAX = 40;
+const PENDING_HOLD_MINUTES = 30;
+
+/** Phone number the buyer typed at checkout (required). */
+function parseBuyerPhone(raw) {
+  const phone = typeof raw === 'string' ? raw.replace(/[\r\n\t]+/g, '').trim() : '';
+  if (!phone) return { error: 'Please enter your phone number.' };
+  if (!PHONE_RE.test(phone) || phone.replace(/\D/g, '').length < 7) return { error: 'Please enter a valid phone number.' };
+  return { phone };
+}
+
+const isTournamentLine = (l) => !!(l && l._item && l._item.tournament);
+
+/**
+ * Player usernames for the tournament games in an order.
+ * body.usernames = { [item_id]: "username" }. Returns { entries } (null when
+ * the order has no tournament game) or { error }.
+ */
+function parseEntryUsernames(body = {}, game) {
+  const lines = (game && game.lines || []).filter(isTournamentLine);
+  if (!lines.length) return { entries: null };
+  const given = body && typeof body.usernames === 'object' && body.usernames ? body.usernames : {};
+  const entries = [];
+  for (const l of lines) {
+    const raw = typeof given[l.item_id] === 'string' ? given[l.item_id] : '';
+    const username = raw.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().replace(/\s+/g, ' ');
+    if (username.length < 2) return { error: `Please enter your ${l.name} player username.` };
+    if (username.length > USERNAME_MAX) return { error: `${l.name} username is too long (max ${USERNAME_MAX} characters).` };
+    entries.push({ item_id: l.item_id, name: l.name, username });
+  }
+  return { entries };
+}
+
+/**
+ * Refuse a tournament entry that breaks "1 per person": more than 1 entry in
+ * the order, an entry the buyer already holds, or a checkout for it still
+ * open (last 30 minutes). Buyer = { userId } or { guestEmail }.
+ */
+async function tournamentError(game, { userId = null, guestEmail = null } = {}) {
+  const lines = (game && game.lines || []).filter(isTournamentLine);
+  if (!lines.length) return null;
+  for (const l of lines) {
+    if (l.plays > 1) return `${l.name} is a tournament: 1 entry per person.`;
+  }
+  if (!userId && !guestEmail) return null;
+  const eventId = lines[0]._item.event_id;
+  const byBuyer = (q) => userId ? q.eq('user_id', userId) : q.ilike('guest_email', guestEmail);
+
+  let regs = await byBuyer(supabase.from('event_registrations')
+    .select('status, ticket_quantity, event_item_id, order_items').eq('event_id', eventId));
+  if (regs.error && isMissingColumn(regs.error, 'order_items')) {
+    regs = await byBuyer(supabase.from('event_registrations').select('status, ticket_quantity, event_item_id').eq('event_id', eventId));
+  }
+  if (regs.error) throw regs.error;
+  const held = (regs.data || []).filter(r => (r.status || 'registered') !== 'cancelled');
+
+  const since = new Date(Date.now() - PENDING_HOLD_MINUTES * 60 * 1000).toISOString();
+  let pend = await byBuyer(supabase.from('payments')
+    .select('status, ticket_quantity, event_item_id, order_items, submitted_at')
+    .eq('event_id', eventId).eq('status', 'pending').gte('submitted_at', since));
+  if (pend.error && isMissingColumn(pend.error, 'order_items')) {
+    pend = await byBuyer(supabase.from('payments').select('status, ticket_quantity, event_item_id, submitted_at')
+      .eq('event_id', eventId).eq('status', 'pending').gte('submitted_at', since));
+  }
+  const pending = pend.error ? [] : (pend.data || []);
+
+  for (const l of lines) {
+    if (held.some(r => playsOfItemIn(r, l.item_id) > 0)) return `You already have an entry for ${l.name}. It's 1 entry per person.`;
+    if (pending.some(p => playsOfItemIn(p, l.item_id) > 0)) {
+      return `You already started a checkout for ${l.name}. Finish that payment, or try again in ${PENDING_HOLD_MINUTES} minutes.`;
+    }
+  }
+  return null;
+}
+
+/** Which games of an event are fully booked: [{ item_id, full }]. No counts. */
+async function gamesAvailability(eventId) {
+  const items = await loadEventItems(eventId);
+  const out = [];
+  for (const it of items) {
+    const left = await playsRemainingForItem(it);
+    out.push({ item_id: it.id, full: left <= 0 });
+  }
+  return out;
+}
+
 module.exports = {
+  parseBuyerPhone,
+  parseEntryUsernames,
+  tournamentError,
+  gamesAvailability,
+  isTournamentLine,
   MAX_GAMES_PER_EVENT,
   isUuid,
   loadEventItems,

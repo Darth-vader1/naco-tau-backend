@@ -57,6 +57,7 @@
 | 029 | `029_payment_archive.sql` | `archived_at`, `archived_by`, `archive_reason` on `payments` (soft delete, e.g. test payments; left out of revenue and stats) | ✅ Applied 16 Nov 2026 |
 | 030 | `030_email_send_log.sql` | `email_send_log`: one row per email sent (counts and hashed recipients only) for the Gmail daily-limit meter | ✅ Applied 16 Nov 2026 |
 | 031 | `031_event_checkins.sql` | `event_checkins` (door admissions per ticket) and `admit_tickets()` (locks the ticket so it can't admit more people than bought) | ✅ Applied 16 Nov 2026 |
+| 032 | `032_tournaments_and_buyer_phone.sql` | `event_items.tournament` (1 entry per person + player username), `payments.buyer_phone`, `entry_details` on payments and registrations | ✅ Applied 17 Nov 2026 |
 
 ---
 
