@@ -2689,16 +2689,87 @@ const cronOrAdmin = (req, res, next) => {
 };
 const runAbandonCleanup = async (req, res) => {
   try {
+    const recheck = await recheckPendingOnlinePayments({ limit: 50 });
     const result = await markAbandonedCheckouts();
-    if (result.marked) {
+    if (result.marked || recheck.verified) {
       await auditLog({ action: 'checkouts_marked_abandoned', userId: req.userId || null, details: { ...result, via: req.viaCron ? 'cron' : 'admin' }, ip: req.ip });
     }
-    return successResponse(res, result, `${result.marked} unpaid checkout(s) marked abandoned`);
+    return successResponse(res, { ...result, recheck }, `${recheck.verified} paid checkout(s) verified, ${result.marked} unpaid checkout(s) marked abandoned`);
   } catch (error) {
     console.error('[checkouts] cleanup error:', error);
     return errorResponse(res, 'Could not clean up abandoned checkouts', 500, error);
   }
 };
+async function recheckPendingOnlinePayments({ limit = 30, includeRecentAbandoned = false } = {}) {
+  const statuses = includeRecentAbandoned ? ['pending', 'abandoned'] : ['pending'];
+  const { data: rows, error } = await supabase
+    .from('payments')
+    .select('*')
+    .in('status', statuses)
+    .ilike('notes', '%[online-checkout]%')
+    .not('transaction_id', 'is', null)
+    .not('event_id', 'is', null)
+    .order('submitted_at', { ascending: false })
+    .limit(Math.min(50, Math.max(1, parseInt(limit, 10) || 30)));
+  if (error) throw error;
+
+  const list = rows || [];
+  if (!list.length) return { checked: 0, verified: 0, stillUnpaid: 0, errors: 0 };
+
+  const eventIds = [...new Set(list.map(r => r.event_id).filter(Boolean))];
+  const { data: evRows, error: evErr } = await supabase.from('events').select('*').in('id', eventIds);
+  if (evErr) throw evErr;
+  const evById = Object.fromEntries((evRows || []).map(e => [e.id, e]));
+
+  let verified = 0;
+  let stillUnpaid = 0;
+  let errors = 0;
+
+  for (let i = 0; i < list.length; i += 5) {
+    const batch = list.slice(i, i + 5);
+    const settled = await Promise.allSettled(batch.map(async (payment) => {
+      const event = evById[payment.event_id];
+      if (!event) return { status: 'error' };
+      const outcome = await confirmOnlineOrder({ payment, event, source: 'bulk re-check' });
+      if (outcome.ok) return { status: 'verified' };
+      if (outcome.status >= 500) return { status: 'error' };
+      return { status: 'unpaid' };
+    }));
+    settled.forEach(r => {
+      if (r.status !== 'fulfilled') { errors++; return; }
+      if (r.value.status === 'verified') verified++;
+      else if (r.value.status === 'unpaid') stillUnpaid++;
+      else errors++;
+    });
+  }
+
+  return { checked: list.length, verified, stillUnpaid, errors };
+}
+
+const runBulkRecheck = async (req, res) => {
+  try {
+    const includeAbandoned = req.query?.includeAbandoned === 'true' || req.body?.includeAbandoned === true;
+    const result = await recheckPendingOnlinePayments({ limit: 40, includeRecentAbandoned: includeAbandoned });
+    if (result.verified > 0) {
+      await auditLog({
+        action: 'payments_bulk_gateway_rechecked',
+        userId: req.userId || null,
+        details: { ...result, via: req.viaCron ? 'cron' : 'admin' },
+        ip: req.ip
+      });
+    }
+    return successResponse(
+      res,
+      result,
+      `Checked ${result.checked} pending checkout(s): ${result.verified} verified, ${result.stillUnpaid} still unpaid.`
+    );
+  } catch (error) {
+    console.error('[payments] bulk re-check error:', error);
+    return errorResponse(res, 'Could not re-check pending payments', 500, error);
+  }
+};
+router.get('/recheck-pending', cronOrAdmin, runBulkRecheck);
+router.post('/recheck-pending', cronOrAdmin, runBulkRecheck);
 router.get('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
 router.post('/cleanup-abandoned', cronOrAdmin, runAbandonCleanup);
 
