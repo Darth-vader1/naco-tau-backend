@@ -260,7 +260,7 @@ function parseItemsInput(raw) {
 // ---------------------------------------------------------------------------
 const PHONE_RE = /^\+?[0-9][0-9 ()-]{6,19}$/;
 const USERNAME_MAX = 40;
-const PENDING_HOLD_MINUTES = 30;
+const PENDING_HOLD_MINUTES = 5;
 
 /** Phone number the buyer typed at checkout (required). */
 function parseBuyerPhone(raw) {
@@ -297,7 +297,7 @@ function parseEntryUsernames(body = {}, game) {
  * the order, an entry the buyer already holds, or a checkout for it still
  * open (last 30 minutes). Buyer = { userId } or { guestEmail }.
  */
-async function tournamentError(game, { userId = null, guestEmail = null } = {}) {
+async function tournamentError(game, { userId = null, guestEmail = null, resolvePending = null } = {}) {
   const lines = (game && game.lines || []).filter(isTournamentLine);
   if (!lines.length) return null;
   for (const l of lines) {
@@ -317,17 +317,31 @@ async function tournamentError(game, { userId = null, guestEmail = null } = {}) 
 
   const since = new Date(Date.now() - PENDING_HOLD_MINUTES * 60 * 1000).toISOString();
   let pend = await byBuyer(supabase.from('payments')
-    .select('status, ticket_quantity, event_item_id, order_items, submitted_at')
+    .select('id, transaction_id, amount, user_id, guest_email, notes, status, ticket_quantity, event_item_id, order_items, submitted_at')
     .eq('event_id', eventId).eq('status', 'pending').gte('submitted_at', since));
   if (pend.error && isMissingColumn(pend.error, 'order_items')) {
-    pend = await byBuyer(supabase.from('payments').select('status, ticket_quantity, event_item_id, submitted_at')
+    pend = await byBuyer(supabase.from('payments').select('id, transaction_id, amount, user_id, guest_email, notes, status, ticket_quantity, event_item_id, submitted_at')
       .eq('event_id', eventId).eq('status', 'pending').gte('submitted_at', since));
   }
   const pending = pend.error ? [] : (pend.data || []);
 
   for (const l of lines) {
     if (held.some(r => playsOfItemIn(r, l.item_id) > 0)) return `You already have an entry for ${l.name}. It's 1 entry per person.`;
-    if (pending.some(p => playsOfItemIn(p, l.item_id) > 0)) {
+    const matchingPending = pending.filter(p => playsOfItemIn(p, l.item_id) > 0);
+    if (matchingPending.length) {
+      if (typeof resolvePending === "function") {
+        let blocked = false;
+        for (const p of matchingPending) {
+          const outcome = await resolvePending(p);
+          if (outcome === "paid") {
+            return `You already paid for ${l.name}! Your ticket has been confirmed and emailed to you — check "My payments & tickets" (or "Find my guest ticket").`;
+          }
+          if (outcome !== "abandoned") {
+            blocked = true;
+          }
+        }
+        if (!blocked) continue;
+      }
       return `You already started a checkout for ${l.name}. Finish that payment, or try again in ${PENDING_HOLD_MINUTES} minutes.`;
     }
   }

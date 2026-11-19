@@ -78,10 +78,10 @@ Module._load = function (request, parent, isMain) {
 };
 
 // Fake Bachs gateway
-let gateway = {};
+let gateway = {}; let gwSeq = 0;
 const nativeFetch = global.fetch;
 global.fetch = async (url, opts) => {
-  if (opts.method === 'POST') { gateway.lastCreate = JSON.parse(opts.body); return { ok: true, status: 200, json: async () => ({ id: 'chk_1', checkout_url: 'https://pay/x' }) }; }
+  if (opts.method === 'POST') { gateway.lastCreate = JSON.parse(opts.body); const id = 'chk_' + (++gwSeq); return { ok: true, status: 200, json: async () => ({ id, checkout_url: 'https://pay/' + id }) }; }
   const ref = decodeURIComponent(url.split('/').pop());
   const s = gateway[ref];
   if (!s) return { ok: false, status: 404, json: async () => ({ message: 'not found' }) };
@@ -153,7 +153,12 @@ const efb = (extra = {}) => ({ event_id: 'evt-gn', items: [{ item_id: EFB, plays
   pay = db.payments[db.payments.length - 1];
   check('1 entry with a username goes through; username stored cleaned', r.status === 200 && Array.isArray(pay.entry_details) && pay.entry_details[0].username === 'bKolo/b King' && pay.entry_details[0].item_id === EFB && pay.entry_details[0].name === 'eFootball Mobile', pay.entry_details);
   r = await call('/bachs-session', 'u2', efb());
-  check('a second checkout while the first is still open is refused', r.status === 409 && /already started a checkout/.test(r.body.error), r.body);
+  check('retrying an unpaid tournament checkout retires the stale pending row and opens a fresh checkout', r.status === 200 && pay.status === 'abandoned', { status: r.status, oldStatus: pay.status, body: r.body });
+  pay = db.payments[db.payments.length - 1];
+  gateway[pay.transaction_id] = { status: 'completed', pricing: { amount: pay.amount.toFixed(2), currency: 'NGN' }, customer: { email: 'u2@st.tau.edu.ng' } };
+  r = await call('/bachs-session', 'u2', efb());
+  check('retrying when the earlier checkout was actually paid settles it and blocks duplicate payment', r.status === 409 && /already paid/.test(r.body.error) && pay.status === 'verified', { status: r.status, body: r.body, pay });
+  delete gateway[pay.transaction_id];
 
   // Pay the entry, then try again
   pay.status = 'verified';
@@ -186,12 +191,13 @@ const efb = (extra = {}) => ({ event_id: 'evt-gn', items: [{ item_id: EFB, plays
   r = await call('/guest-session', '', { event_id: 'evt-gn', name: 'Gus Guest', email: 'gus@gmail.com', phone: '08099998888', items: [{ item_id: EFB, plays: 1 }], usernames: { [EFB]: 'GusPlays' } });
   pay = db.payments[db.payments.length - 1];
   check('guest entry saves username and phone', r.status === 200 && pay.entry_details[0].username === 'GusPlays' && pay.buyer_phone === '08099998888', pay);
-  r = await call('/guest-session', '', { event_id: 'evt-gn', name: 'Gus Guest', email: 'GUS@gmail.com', phone: '08099998888', items: [{ item_id: EFB, plays: 1 }], usernames: { [EFB]: 'GusAgain' } });
-  check('same guest email (any case) cannot start a second entry', r.status === 409, r.body);
+  r = await call('/guest-session', '', { event_id: 'evt-gn', name: 'Gus Guest', email: 'GUS@gmail.com', phone: '08099998888', items: [{ item_id: EFB, plays: 1 }], usernames: { [EFB]: 'GusPlays' } });
+  check('guest retrying an unpaid tournament checkout retires the old pending row and starts fresh', r.status === 200 && pay.status === 'abandoned', { status: r.status, oldStatus: pay.status, body: r.body });
+  pay = db.payments[db.payments.length - 1];
 
   // Ticket keeps the username
-  gateway['chk_1'] = { status: 'completed', pricing: { amount: pay.amount.toFixed(2), currency: 'NGN' }, customer: { email: 'gus@gmail.com' } };
-  r = await call('/guest-verify', '', { reference: 'chk_1', email: 'gus@gmail.com' });
+  gateway[pay.transaction_id] = { status: 'completed', pricing: { amount: pay.amount.toFixed(2), currency: 'NGN' }, customer: { email: 'gus@gmail.com' } };
+  r = await call('/guest-verify', '', { reference: pay.transaction_id, email: 'gus@gmail.com' });
   const reg = db.event_registrations.find(x => x.linked_payment_id === pay.id);
   check('the ticket (registration) carries the player username', reg && Array.isArray(reg.entry_details) && reg.entry_details[0].username === 'GusPlays', { r: r.body, reg });
 

@@ -5,7 +5,7 @@ const { quantityOf, seatsRemaining, syncAttendeeCount } = require('../utils/tick
 const { supabase } = require('../config/supabase');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const { successResponse, errorResponse } = require('../utils/helpers');
-const { triggerAutoContentBroadcast } = require('../services/email');
+const { triggerAutoContentBroadcast, sendEventWinnersEmail, sendEventWinnerCongratsEmail } = require('../services/email');
 const { auditLog } = require('../middleware/audit');
 const { isUuid, loadEventItems, parseItemsInput } = require('../utils/games');
 
@@ -526,6 +526,289 @@ router.post('/:id/register', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Event registration error:', error);
     return errorResponse(res, 'Failed to register for event', 500, error);
+  }
+});
+
+// ============================================
+// EVENT & GAME NIGHT WINNERS
+// ============================================
+
+function isMissingWinnersTable(err) {
+  if (!err) return false;
+  const msg = String(err.message || '').toLowerCase();
+  return err.code === '42P01' || err.code === 'PGRST205' || msg.includes('event_winners');
+}
+
+async function enrichWinnersWithGames(winners) {
+  if (!Array.isArray(winners) || winners.length === 0) return [];
+  const itemIds = [...new Set(winners.map(w => w.item_id).filter(Boolean))];
+  const gameMap = {};
+  if (itemIds.length > 0) {
+    const { data: items } = await supabase
+      .from('event_items')
+      .select('id, name')
+      .in('id', itemIds);
+    (items || []).forEach(it => { gameMap[it.id] = it.name; });
+  }
+  return winners.map(w => ({
+    ...w,
+    game_name: w.item_id ? (gameMap[w.item_id] || null) : null
+  }));
+}
+
+// Public: Get recently announced winners across events (keyed by event_id)
+router.get('/winners/recent', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('event_winners')
+      .select('id, event_id, item_id, winner_name, in_game_username, placement, prize, note, announced_at')
+      .not('announced_at', 'is', null)
+      .order('announced_at', { ascending: false })
+      .order('created_at', { ascending: true })
+      .limit(100);
+
+    if (error) {
+      if (isMissingWinnersTable(error)) return successResponse(res, { winners: [], tableMissing: true }, 'Winners not yet configured');
+      throw error;
+    }
+
+    const enriched = await enrichWinnersWithGames(data || []);
+    return successResponse(res, { winners: enriched }, 'Event winners retrieved');
+  } catch (error) {
+    console.error('Recent winners fetch error:', error);
+    return errorResponse(res, 'Failed to fetch event winners', 500, error);
+  }
+});
+
+// Public / Admin: Get winners for a specific event
+router.get('/:id/winners', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+
+    const includeDrafts = req.query.includeDrafts === 'true' && req.headers.authorization;
+    let isAdminCaller = false;
+    if (includeDrafts) {
+      // Verify admin if drafts requested
+      try {
+        const token = req.headers.authorization.replace(/^Bearer\s+/i, '').trim();
+        const { data: { user } } = await supabase.auth.getUser(token);
+        if (user) {
+          const { data: adminRow } = await supabase.from('admin_users').select('id').eq('user_id', user.id).maybeSingle();
+          isAdminCaller = !!adminRow;
+        }
+      } catch (_) {}
+    }
+
+    let query = supabase
+      .from('event_winners')
+      .select(isAdminCaller ? '*' : 'id, event_id, item_id, winner_name, in_game_username, placement, prize, note, announced_at')
+      .eq('event_id', id)
+      .order('created_at', { ascending: true });
+
+    if (!isAdminCaller) {
+      query = query.not('announced_at', 'is', null);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      if (isMissingWinnersTable(error)) return successResponse(res, { winners: [], tableMissing: true }, 'Winners table not yet migrated');
+      throw error;
+    }
+
+    const enriched = await enrichWinnersWithGames(data || []);
+    return successResponse(res, { winners: enriched }, 'Event winners retrieved');
+  } catch (error) {
+    console.error('Event winners fetch error:', error);
+    return errorResponse(res, 'Failed to fetch event winners', 500, error);
+  }
+});
+
+// Admin: Add a winner to an event
+router.post('/:id/winners', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+
+    const { item_id, registration_id, winner_name, in_game_username, winner_email, placement, prize, note } = req.body || {};
+    if (!winner_name || !String(winner_name).trim()) {
+      return errorResponse(res, 'Winner name is required', 400);
+    }
+
+    let resolvedEmail = winner_email ? String(winner_email).trim() : null;
+    let resolvedGamertag = in_game_username ? String(in_game_username).trim() : null;
+
+    if (registration_id && isUuid(registration_id)) {
+      const { data: reg } = await supabase
+        .from('event_registrations')
+        .select('user_id, guest_email, order_items, entry_details')
+        .eq('id', registration_id)
+        .eq('event_id', id)
+        .maybeSingle();
+
+      if (reg) {
+        if (!resolvedEmail) {
+          if (reg.guest_email) {
+            resolvedEmail = reg.guest_email;
+          } else if (reg.user_id) {
+            const { data: st } = await supabase.from('students').select('email').eq('user_id', reg.user_id).maybeSingle();
+            if (st?.email) resolvedEmail = st.email;
+          }
+        }
+        const entries = Array.isArray(reg.entry_details) ? reg.entry_details : (Array.isArray(reg.order_items) ? reg.order_items : []);
+        if (!resolvedGamertag && entries.length) {
+          const match = item_id ? entries.find(x => x.item_id === item_id && x.username) : entries.find(x => x.username);
+          if (match?.username) resolvedGamertag = match.username;
+        }
+      }
+    }
+
+    const payload = {
+      event_id: id,
+      item_id: (item_id && isUuid(item_id)) ? item_id : null,
+      registration_id: (registration_id && isUuid(registration_id)) ? registration_id : null,
+      winner_name: String(winner_name).trim(),
+      in_game_username: resolvedGamertag,
+      winner_email: resolvedEmail,
+      placement: (placement && String(placement).trim()) || '1st Place',
+      prize: prize ? String(prize).trim() : null,
+      note: note ? String(note).trim() : null,
+      created_by: req.userId || null
+    };
+
+    const { data, error } = await supabase
+      .from('event_winners')
+      .insert([payload])
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const [enriched] = await enrichWinnersWithGames([data]);
+    await auditLog({
+      action: 'event_winner_added',
+      userId: req.userId,
+      details: { event_id: id, winner_id: data.id, winner_name: data.winner_name, placement: data.placement },
+      ip: req.ip
+    });
+
+    return successResponse(res, { winner: enriched }, 'Winner added successfully', 201);
+  } catch (error) {
+    console.error('Add event winner error:', error);
+    return errorResponse(res, 'Failed to add event winner', 500, error);
+  }
+});
+
+// Admin: Remove a winner
+router.delete('/:id/winners/:winnerId', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id, winnerId } = req.params;
+    if (!isUuid(id) || !isUuid(winnerId)) return errorResponse(res, 'Invalid id', 400);
+
+    const { error } = await supabase
+      .from('event_winners')
+      .delete()
+      .eq('id', winnerId)
+      .eq('event_id', id);
+
+    if (error) throw error;
+
+    await auditLog({
+      action: 'event_winner_deleted',
+      userId: req.userId,
+      details: { event_id: id, winner_id: winnerId },
+      ip: req.ip
+    });
+
+    return successResponse(res, null, 'Winner removed successfully');
+  } catch (error) {
+    console.error('Delete event winner error:', error);
+    return errorResponse(res, 'Failed to remove winner', 500, error);
+  }
+});
+
+// Admin: Publish / Announce winners & optionally email winners / participants / students
+router.post('/:id/winners/announce', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) return errorResponse(res, 'Invalid event id', 400);
+
+    const { notify_winners = true, notify_scope = 'participants' } = req.body || {};
+
+    const { data: event, error: evErr } = await supabase
+      .from('events')
+      .select('id, title, date')
+      .eq('id', id)
+      .maybeSingle();
+    if (evErr) throw evErr;
+    if (!event) return errorResponse(res, 'Event not found', 404);
+
+    const now = new Date().toISOString();
+    const { data: updated, error: updErr } = await supabase
+      .from('event_winners')
+      .update({ announced_at: now })
+      .eq('event_id', id)
+      .select();
+
+    if (updErr) throw updErr;
+    if (!updated || updated.length === 0) {
+      return errorResponse(res, 'Add at least one winner before announcing.', 400);
+    }
+
+    const winners = await enrichWinnersWithGames(updated);
+    let congratsSent = 0;
+    let broadcastCount = 0;
+
+    if (notify_winners) {
+      const results = await Promise.allSettled(
+        winners.filter(w => w.winner_email).map(w => sendEventWinnerCongratsEmail({ event, winner: w }))
+      );
+      congratsSent = results.filter(r => r.status === 'fulfilled' && r.value?.success).length;
+    }
+
+    if (notify_scope === 'all_students') {
+      const bRes = await sendEventWinnersEmail({ event, winners, broadcastAll: true });
+      broadcastCount = bRes?.totalSent || bRes?.sentCount || 0;
+    } else if (notify_scope === 'participants') {
+      const { data: regs } = await supabase
+        .from('event_registrations')
+        .select('user_id, guest_email')
+        .eq('event_id', id);
+
+      const emails = new Set();
+      const userIds = [];
+      (regs || []).forEach(r => {
+        if (r.guest_email) emails.add(String(r.guest_email).trim().toLowerCase());
+        if (r.user_id) userIds.push(r.user_id);
+      });
+      if (userIds.length > 0) {
+        const { data: studs } = await supabase
+          .from('students')
+          .select('email')
+          .in('user_id', [...new Set(userIds)]);
+        (studs || []).forEach(s => { if (s.email) emails.add(String(s.email).trim().toLowerCase()); });
+      }
+      if (emails.size > 0) {
+        const bRes = await sendEventWinnersEmail({ event, winners, recipients: [...emails], broadcastAll: false });
+        broadcastCount = bRes?.sentCount || 0;
+      }
+    }
+
+    await auditLog({
+      action: 'event_winners_announced',
+      userId: req.userId,
+      details: { event_id: id, winner_count: winners.length, congratsSent, notify_scope, broadcastCount },
+      ip: req.ip
+    });
+
+    return successResponse(res, {
+      winners,
+      congratsSent,
+      broadcastCount
+    }, 'Winners announced successfully!');
+  } catch (error) {
+    console.error('Announce winners error:', error);
+    return errorResponse(res, 'Failed to announce winners', 500, error);
   }
 });
 

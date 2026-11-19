@@ -1547,6 +1547,124 @@ async function checkAndSendProfileReminders({ dryRun = false, limit = 50 } = {})
     }
 }
 
+// ============================================
+// SEND EVENT / GAME NIGHT WINNERS ANNOUNCEMENT EMAIL
+// ============================================
+async function sendEventWinnersEmail({ event, winners = [], recipients = null, broadcastAll = false }) {
+    try {
+        if (!event || !Array.isArray(winners) || winners.length === 0) {
+            return { success: false, error: 'No winners to announce' };
+        }
+        const eventTitle = event.title || 'Game Night';
+        const rowsHtml = winners.map(w => {
+            const gameName = w.game_name ? `<span style="color:#157a09;font-weight:600;">${escEmail(w.game_name)}</span>` : 'Overall';
+            const tag = w.in_game_username ? ` <span style="color:#64748b;font-size:12px;">(@${escEmail(w.in_game_username)})</span>` : '';
+            const prize = w.prize ? `<span class="badge badge-prize">${escEmail(w.prize)}</span>` : '—';
+            return `
+                <tr>
+                    <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;">${gameName}</td>
+                    <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:700;color:#b45309;">${escEmail(w.placement || '1st Place')}</td>
+                    <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;font-weight:600;color:#0f172a;">${escEmail(w.winner_name)}${tag}</td>
+                    <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:13px;">${prize}</td>
+                </tr>
+            `;
+        }).join('');
+
+        const tableHtml = `
+            <div style="margin:18px 0;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+                <table style="width:100%;border-collapse:collapse;background:#ffffff;">
+                    <thead>
+                        <tr style="background:#f8fafc;text-align:left;">
+                            <th style="padding:10px 12px;font-size:12px;text-transform:uppercase;color:#64748b;">Category / Game</th>
+                            <th style="padding:10px 12px;font-size:12px;text-transform:uppercase;color:#64748b;">Position</th>
+                            <th style="padding:10px 12px;font-size:12px;text-transform:uppercase;color:#64748b;">Champion</th>
+                            <th style="padding:10px 12px;font-size:12px;text-transform:uppercase;color:#64748b;">Prize</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+            </div>
+        `;
+
+        const html = renderBaseLayout({
+            headerBadge: 'Champions Announced',
+            headerTitle: `${eventTitle} Winners`,
+            headerSubtitle: 'Congratulations to our champions!',
+            contentTitle: 'Official Winners Roll',
+            metaRows: [
+                { label: 'Event', value: `<strong>${escEmail(eventTitle)}</strong>` },
+                { label: 'Winners Announced', value: `${winners.length}` }
+            ],
+            extraHtml: tableHtml,
+            buttonText: 'View Events Archive',
+            buttonUrl: `${FRONTEND_URL}/events-archive.html`,
+            noticeText: 'Thank you to everyone who participated and made the event a success!'
+        });
+
+        const plainLines = winners.map(w =>
+            `- ${w.game_name || 'Overall'} | ${w.placement || '1st Place'}: ${w.winner_name}${w.in_game_username ? ` (@${w.in_game_username})` : ''}${w.prize ? ` — ${w.prize}` : ''}`
+        ).join('\n');
+        const text = `${eventTitle} — Official Winners\n\n${plainLines}\n\nView more at ${FRONTEND_URL}/events-archive.html`;
+        const subject = `Winners Announced: ${eventTitle}`;
+
+        if (broadcastAll) {
+            return await sendBulkEmail({ subject, html, text });
+        }
+
+        const list = Array.isArray(recipients)
+            ? [...new Set(recipients.map(e => String(e || '').trim().toLowerCase()).filter(Boolean))]
+            : [];
+        if (list.length === 0) return { success: true, sentCount: 0 };
+
+        // Send in BCC batches of 40
+        let sentCount = 0;
+        for (let i = 0; i < list.length; i += 40) {
+            const batch = list.slice(i, i + 40);
+            const res = await sendEmail({ bcc: batch, subject, html, text });
+            if (res && res.success) sentCount += batch.length;
+        }
+        return { success: true, sentCount };
+    } catch (err) {
+        console.error('[sendEventWinnersEmail] Error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+async function sendEventWinnerCongratsEmail({ event, winner }) {
+    try {
+        const to = String(winner?.winner_email || '').trim();
+        if (!to) return { success: false, error: 'No winner email' };
+        const eventTitle = event?.title || 'Game Night';
+        const gameLabel = winner.game_name ? ` (${winner.game_name})` : '';
+        const html = renderBaseLayout({
+            headerBadge: 'Congratulations!',
+            headerTitle: `You Won at ${eventTitle}!`,
+            headerSubtitle: `${winner.placement || '1st Place'}${gameLabel}`,
+            contentTitle: `Congratulations, ${escEmail(winner.winner_name)}!`,
+            metaRows: [
+                { label: 'Event', value: `<strong>${escEmail(eventTitle)}</strong>` },
+                ...(winner.game_name ? [{ label: 'Game / Category', value: `<strong>${escEmail(winner.game_name)}</strong>` }] : []),
+                { label: 'Placement', value: `<strong style="color:#b45309;">${escEmail(winner.placement || '1st Place')}</strong>` },
+                ...(winner.prize ? [{ label: 'Prize', value: `<span class="badge badge-prize">${escEmail(winner.prize)}</span>` }] : []),
+                ...(winner.note ? [{ label: 'Note', value: escEmail(winner.note) }] : [])
+            ],
+            buttonText: 'View Events Archive',
+            buttonUrl: `${FRONTEND_URL}/events-archive.html`,
+            noticeText: 'Keep an eye out for communications from the NACOS executive team regarding prize collection.'
+        });
+        const text = `Congratulations ${winner.winner_name}! You placed ${winner.placement || '1st Place'}${gameLabel} at ${eventTitle}.${winner.prize ? ` Prize: ${winner.prize}.` : ''}`;
+        return await sendEmail({
+            to,
+            subject: `Congratulations! ${winner.placement || 'Winner'} — ${eventTitle}${gameLabel}`,
+            html,
+            text
+        });
+    } catch (err) {
+        console.error('[sendEventWinnerCongratsEmail] Error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
 // EXPORT
 // ============================================
 module.exports = {
@@ -1566,5 +1684,7 @@ module.exports = {
     normalizeDepartment,
     matchesTargetFilter,
     sendProfileUpdateReminderEmail,
-    checkAndSendProfileReminders
+    checkAndSendProfileReminders,
+    sendEventWinnersEmail,
+    sendEventWinnerCongratsEmail
 };

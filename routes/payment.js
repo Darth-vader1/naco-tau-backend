@@ -447,7 +447,7 @@ router.post('/bachs-session', authenticate, async (req, res) => {
     if (phoneCheck.error) return errorResponse(res, phoneCheck.error, 400);
     const entryCheck = parseEntryUsernames(req.body, game);
     if (entryCheck.error) return errorResponse(res, entryCheck.error, 400);
-    const tourErr = await tournamentError(game, { userId: req.userId });
+    const tourErr = await tournamentError(game, { userId: req.userId, resolvePending: (p) => resolvePendingTournamentPayment(p, payable.event) });
     if (tourErr) return errorResponse(res, tourErr, 409);
     // Save the number on the student's profile if they don't have one yet.
     supabase.from('students').update({ phone: phoneCheck.phone })
@@ -1343,6 +1343,36 @@ const publicEventSummary = (ev) => ev ? {
  *
  * Returns { ok: true, settled, ticketNumber, newlyIssued } or { ok: false, status, error }.
  */
+/**
+ * When a player retries a tournament checkout while an earlier pending
+ * checkout still exists, ask Bachs first:
+ *  - If Bachs says it was PAID, settle it and issue their ticket ("paid").
+ *  - If Bachs says it is unpaid/open/expired, mark it abandoned ("abandoned")
+ *    so the player can start a fresh checkout immediately without waiting.
+ *  - If Bachs cannot be reached (5xx) or it is a manual proof, hold ("hold").
+ */
+async function resolvePendingTournamentPayment(payment, event) {
+  if (!payment || !payment.transaction_id || !isOnlineCheckoutRow(payment)) return "hold";
+  try {
+    const outcome = await confirmOnlineOrder({ payment, event, source: "tournament retry check" });
+    if (outcome.ok) return "paid";
+    if (outcome.status >= 500) return "hold";
+    // Gateway confirmed this earlier checkout is not paid — retire it so the player can retry immediately.
+    await supabase
+      .from('payments')
+      .update({
+        status: 'abandoned',
+        notes: `${payment.notes || ''} [replaced on retry]`.trim()
+      })
+      .eq('id', payment.id)
+      .eq('status', 'pending');
+    return "abandoned";
+  } catch (err) {
+    console.warn('[tournament retry check] could not verify pending order:', err?.message || err);
+    return "hold";
+  }
+}
+
 async function confirmOnlineOrder({ payment, event, source }) {
   const quantity = quantityOf(payment);
   let settled = payment;
@@ -1695,7 +1725,7 @@ router.post('/guest-session', guestLimiter, async (req, res) => {
     if (capErr) return errorResponse(res, capErr, 409);
     const entryCheck = parseEntryUsernames(req.body, game);
     if (entryCheck.error) return errorResponse(res, entryCheck.error, 400);
-    const tourErr = await tournamentError(game, { guestEmail: guest.email });
+    const tourErr = await tournamentError(game, { guestEmail: guest.email, resolvePending: (p) => resolvePendingTournamentPayment(p, payable.event) });
     if (tourErr) return errorResponse(res, tourErr, 409);
 
     const unitPrice = payable.price;
